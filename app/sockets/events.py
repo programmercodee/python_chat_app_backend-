@@ -1,6 +1,7 @@
 """
 Socket.IO event handlers.
 Handles connect, disconnect, messaging, typing, and presence events.
+Uses MongoDB via Beanie ODM.
 """
 
 from datetime import datetime, timezone
@@ -8,7 +9,6 @@ from datetime import datetime, timezone
 from app.sockets.manager import sio, socket_manager
 from app.core.security import verify_token
 from app.core.exceptions import AuthenticationError
-from app.database import async_session_maker
 from app.services.message_service import MessageService
 from app.services.conversation_service import ConversationService
 from app.services.user_service import UserService
@@ -93,44 +93,42 @@ def register_socket_events():
                 return
         
         try:
-            async with async_session_maker() as db:
-                message_service = MessageService(db)
-                conversation_service = ConversationService(db)
-                
-                message = await message_service.create_message(
-                    sender_id=sender_id,
-                    conversation_id=data['conversation_id'],
-                    encrypted_content=data['encrypted_content'],
-                    nonce=data['nonce'],
-                    content_type=data.get('content_type', 'text'),
-                )
-                
-                await db.commit()
-                
-                conversation = await conversation_service.get_conversation(
-                    data['conversation_id'],
-                    sender_id,
-                )
-                
-                message_data = {
-                    'id': message.id,
-                    'conversation_id': message.conversation_id,
-                    'sender_id': sender_id,
-                    'encrypted_content': message.encrypted_content,
-                    'nonce': message.nonce,
-                    'content_type': message.content_type,
-                    'created_at': message.created_at.isoformat(),
-                }
-                
-                for member in conversation.members:
-                    member_socket = socket_manager.get_socket_id(member.user_id)
-                    if member_socket:
-                        await sio.emit('new_message', message_data, to=member_socket)
-                        if member.user_id != sender_id:
-                            await message_service.mark_as_delivered(message.id)
-                
-                await db.commit()
-                logger.info(f"[Socket] 📨 Message {message.id} sent by {sender_id}")
+            # Use MongoDB services (no db session needed)
+            message_service = MessageService()
+            conversation_service = ConversationService()
+            
+            message = await message_service.create_message(
+                sender_id=sender_id,
+                conversation_id=data['conversation_id'],
+                encrypted_content=data['encrypted_content'],
+                nonce=data['nonce'],
+                content_type=data.get('content_type', 'text'),
+            )
+            
+            conversation = await conversation_service.get_conversation(
+                data['conversation_id'],
+                sender_id,
+            )
+            
+            message_data = {
+                'id': str(message.id),
+                'conversation_id': str(message.conversation_id),
+                'sender_id': sender_id,
+                'encrypted_content': message.encrypted_content,
+                'nonce': message.nonce,
+                'content_type': message.content_type,
+                'created_at': message.created_at.isoformat(),
+            }
+            
+            # Emit to all members
+            for member_id in conversation.member_ids:
+                member_socket = socket_manager.get_socket_id(str(member_id))
+                if member_socket:
+                    await sio.emit('new_message', message_data, to=member_socket)
+                    if str(member_id) != sender_id:
+                        await message_service.mark_as_delivered(str(message.id))
+            
+            logger.info(f"[Socket] 📨 Message {message.id} sent by {sender_id}")
                 
         except Exception as e:
             logger.exception(f"[Socket] Error sending message: {e}")
@@ -147,10 +145,8 @@ def register_socket_events():
             return
         
         try:
-            async with async_session_maker() as db:
-                message_service = MessageService(db)
-                await message_service.mark_as_read(data['message_ids'], user_id)
-                await db.commit()
+            message_service = MessageService()
+            await message_service.mark_as_read(data['message_ids'], user_id)
             
             await sio.emit(
                 'messages_read',
@@ -180,10 +176,9 @@ def register_socket_events():
             return
         
         try:
-            async with async_session_maker() as db:
-                user_service = UserService(db)
-                user = await user_service.get_user(user_id)
-                username = user.username
+            user_service = UserService()
+            user = await user_service.get_user(user_id)
+            username = user.username
         except Exception:
             username = "Someone"
         

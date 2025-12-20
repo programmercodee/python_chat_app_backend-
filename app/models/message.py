@@ -1,100 +1,41 @@
 """
 Message model for storing encrypted messages.
+Uses Beanie ODM for MongoDB.
 """
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
-import uuid
-
-from sqlalchemy import String, DateTime, ForeignKey, Boolean, Text, CHAR
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.database import Base
-
-if TYPE_CHECKING:
-    from app.models.user import User
-    from app.models.conversation import Conversation
+from typing import Optional
+from beanie import Document, Indexed, PydanticObjectId
+from pydantic import Field
 
 
-def generate_uuid() -> str:
-    """Generate a UUID string for primary keys."""
-    return str(uuid.uuid4())
-
-
-class Message(Base):
+class Message(Document):
     """
-    Message model for storing encrypted chat messages.
+    Message document for storing encrypted chat messages.
     
     The server stores only encrypted content - it cannot read message contents.
     """
     
-    __tablename__ = "messages"
-    
-    id: Mapped[str] = mapped_column(
-        CHAR(36),
-        primary_key=True,
-        default=generate_uuid,
-    )
-    conversation_id: Mapped[str] = mapped_column(
-        CHAR(36),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    sender_id: Mapped[Optional[str]] = mapped_column(
-        CHAR(36),
-        ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
+    conversation_id: PydanticObjectId = Field(..., index=True)
+    sender_id: Optional[PydanticObjectId] = Field(None, index=True)
     
     # Encrypted content - stored as base64 encoded string
-    encrypted_content: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-    )
+    encrypted_content: str
     
     # Nonce for AES-GCM decryption
-    nonce: Mapped[str] = mapped_column(
-        String(32),
-        nullable=False,
-    )
+    nonce: str
     
     # Content type for proper rendering on client
-    content_type: Mapped[str] = mapped_column(
-        String(50),
-        default="text",
-        nullable=False,
-    )
+    content_type: str = "text"
     
     # Delivery status
-    is_delivered: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        nullable=False,
-    )
-    is_read: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        nullable=False,
-    )
+    is_delivered: bool = False
+    is_read: bool = False
     
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-        index=True,
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
     
-    # Relationships
-    conversation: Mapped["Conversation"] = relationship(
-        "Conversation",
-        back_populates="messages",
-    )
-    sender: Mapped[Optional["User"]] = relationship(
-        "User",
-        back_populates="sent_messages",
-    )
+    class Settings:
+        name = "messages"
     
     def __repr__(self) -> str:
         return f"<Message(id={self.id}, sender={self.sender_id})>"

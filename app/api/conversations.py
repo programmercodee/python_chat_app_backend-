@@ -1,5 +1,6 @@
 """
 Conversation API routes.
+Updated for MongoDB/Beanie ODM.
 """
 
 from typing import Annotated
@@ -22,7 +23,8 @@ from app.schemas.conversation import (
     ConversationMemberResponse,
     AddMemberRequest,
 )
-from app.models.conversation import ConversationType
+from app.models.conversation import ConversationType, ConversationMember
+from app.models.user import User
 from app.core.exceptions import AppException
 
 
@@ -37,35 +39,36 @@ async def get_conversations(
     presence_service: Annotated[PresenceService, Depends(get_presence_service)],
 ) -> ConversationList:
     """Get all conversations for the current user."""
-    conversations = await conversation_service.get_user_conversations(current_user.id)
+    # get_user_conversations now returns dicts with member details
+    conversations_data = await conversation_service.get_user_conversations(str(current_user.id))
     
     # Get all member user IDs for presence check
     all_member_ids = []
-    for conv in conversations:
-        all_member_ids.extend([m.user_id for m in conv.members])
+    for conv in conversations_data:
+        all_member_ids.extend([m["user_id"] for m in conv["members"]])
     
     online_ids = set(await presence_service.get_online_users(list(set(all_member_ids))))
     
     conv_responses = []
-    for conv in conversations:
+    for conv in conversations_data:
         members = []
-        for m in conv.members:
+        for m in conv["members"]:
             members.append(ConversationMemberResponse(
-                user_id=m.user_id,
-                username=m.user.username,
-                avatar_url=m.user.avatar_url,
-                joined_at=m.joined_at,
-                is_online=m.user_id in online_ids,
+                user_id=m["user_id"],
+                username=m["username"],
+                avatar_url=m.get("avatar_url"),
+                joined_at=conv["created_at"],  # Use conversation created_at as fallback
+                is_online=m["user_id"] in online_ids,
             ))
         
-        unread_count = await message_service.get_unread_count(conv.id, current_user.id)
+        unread_count = await message_service.get_unread_count(conv["id"], str(current_user.id))
         
         conv_responses.append(ConversationResponse(
-            id=conv.id,
-            type=conv.type,
-            name=conv.name,
-            created_at=conv.created_at,
-            updated_at=conv.updated_at,
+            id=conv["id"],
+            type=conv["type"],
+            name=conv.get("name"),
+            created_at=conv["created_at"],
+            updated_at=conv["updated_at"],
             members=members,
             unread_count=unread_count,
         ))
@@ -88,7 +91,7 @@ async def create_conversation(
                     detail="Direct conversations require exactly one member",
                 )
             conversation = await conversation_service.create_direct_conversation(
-                user_id=current_user.id,
+                user_id=str(current_user.id),
                 other_user_id=conv_data.member_ids[0],
             )
         else:
@@ -98,23 +101,25 @@ async def create_conversation(
                     detail="Group conversations require a name",
                 )
             conversation = await conversation_service.create_group_conversation(
-                creator_id=current_user.id,
+                creator_id=str(current_user.id),
                 name=conv_data.name,
                 member_ids=conv_data.member_ids,
             )
         
-        members = [
-            ConversationMemberResponse(
-                user_id=m.user_id,
-                username=m.user.username,
-                avatar_url=m.user.avatar_url,
-                joined_at=m.joined_at,
-            )
-            for m in conversation.members
-        ]
+        # Fetch member details
+        members = []
+        for member_id in conversation.member_ids:
+            user = await User.get(member_id)
+            if user:
+                members.append(ConversationMemberResponse(
+                    user_id=str(user.id),
+                    username=user.username,
+                    avatar_url=user.avatar_url,
+                    joined_at=conversation.created_at,
+                ))
         
         return ConversationResponse(
-            id=conversation.id,
+            id=str(conversation.id),
             type=conversation.type,
             name=conversation.name,
             created_at=conversation.created_at,
@@ -136,25 +141,27 @@ async def get_conversation(
     try:
         conversation = await conversation_service.get_conversation(
             conversation_id,
-            current_user.id,
+            str(current_user.id),
         )
         
-        member_ids = [m.user_id for m in conversation.members]
+        member_ids = [str(mid) for mid in conversation.member_ids]
         online_ids = set(await presence_service.get_online_users(member_ids))
         
-        members = [
-            ConversationMemberResponse(
-                user_id=m.user_id,
-                username=m.user.username,
-                avatar_url=m.user.avatar_url,
-                joined_at=m.joined_at,
-                is_online=m.user_id in online_ids,
-            )
-            for m in conversation.members
-        ]
+        # Fetch member details
+        members = []
+        for member_id in conversation.member_ids:
+            user = await User.get(member_id)
+            if user:
+                members.append(ConversationMemberResponse(
+                    user_id=str(user.id),
+                    username=user.username,
+                    avatar_url=user.avatar_url,
+                    joined_at=conversation.created_at,
+                    is_online=str(user.id) in online_ids,
+                ))
         
         return ConversationResponse(
-            id=conversation.id,
+            id=str(conversation.id),
             type=conversation.type,
             name=conversation.name,
             created_at=conversation.created_at,
@@ -177,13 +184,16 @@ async def add_member(
         member = await conversation_service.add_member(
             conversation_id=conversation_id,
             user_id=member_data.user_id,
-            added_by=current_user.id,
+            added_by=str(current_user.id),
         )
         
+        # Fetch user details
+        user = await User.get(member.user_id)
+        
         return ConversationMemberResponse(
-            user_id=member.user_id,
-            username=member.user.username,
-            avatar_url=member.user.avatar_url,
+            user_id=str(member.user_id),
+            username=user.username if user else member.username,
+            avatar_url=user.avatar_url if user else None,
             joined_at=member.joined_at,
         )
     except AppException as e:
@@ -202,7 +212,7 @@ async def remove_member(
         await conversation_service.remove_member(
             conversation_id=conversation_id,
             user_id=user_id,
-            removed_by=current_user.id,
+            removed_by=str(current_user.id),
         )
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)

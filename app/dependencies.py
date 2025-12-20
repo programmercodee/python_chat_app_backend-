@@ -1,14 +1,14 @@
 """
 FastAPI dependencies for authentication and service injection.
+Uses Beanie ODM - no database session needed.
 """
 
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
+from beanie import PydanticObjectId
 
-from app.database import get_db
 from app.core.security import verify_token
 from app.core.redis import redis_client, RedisClient
 from app.core.exceptions import AuthenticationError
@@ -27,7 +27,6 @@ security = HTTPBearer()
 
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
-    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
     """
     Get the current authenticated user from JWT token.
@@ -51,7 +50,7 @@ async def get_current_user(
         )
     
     # Get user from database
-    auth_service = AuthService(db)
+    auth_service = AuthService()
     user = await auth_service.get_user_by_id(user_id)
     
     if not user:
@@ -75,25 +74,25 @@ async def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-# Service dependencies
-def get_auth_service(db: Annotated[AsyncSession, Depends(get_db)]) -> AuthService:
-    return AuthService(db)
+# Service dependencies - no db session needed with Beanie
+def get_auth_service() -> AuthService:
+    return AuthService()
 
 
-def get_user_service(db: Annotated[AsyncSession, Depends(get_db)]) -> UserService:
-    return UserService(db)
+def get_user_service() -> UserService:
+    return UserService()
 
 
-def get_message_service(db: Annotated[AsyncSession, Depends(get_db)]) -> MessageService:
-    return MessageService(db)
+def get_message_service() -> MessageService:
+    return MessageService()
 
 
-def get_conversation_service(db: Annotated[AsyncSession, Depends(get_db)]) -> ConversationService:
-    return ConversationService(db)
+def get_conversation_service() -> ConversationService:
+    return ConversationService()
 
 
-def get_contact_service(db: Annotated[AsyncSession, Depends(get_db)]) -> ContactService:
-    return ContactService(db)
+def get_contact_service() -> ContactService:
+    return ContactService()
 
 
 def get_presence_service() -> PresenceService:

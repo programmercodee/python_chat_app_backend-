@@ -1,12 +1,11 @@
 """
 Contact service for managing user contacts.
+Uses Beanie ODM for MongoDB.
 """
 
 from typing import Optional
 
-from sqlalchemy import select, and_, or_
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from beanie import PydanticObjectId
 
 from app.core.exceptions import NotFoundError, ConflictError, ValidationError
 from app.models.contact import Contact, ContactStatus
@@ -15,9 +14,6 @@ from app.models.user import User
 
 class ContactService:
     """Service for managing user contacts."""
-    
-    def __init__(self, db: AsyncSession):
-        self.db = db
     
     async def add_contact(
         self,
@@ -31,24 +27,19 @@ class ContactService:
         if user_id == contact_id:
             raise ValidationError(message="Cannot add yourself as a contact")
         
+        user_oid = PydanticObjectId(user_id)
+        contact_oid = PydanticObjectId(contact_id)
+        
         # Verify contact user exists
-        result = await self.db.execute(
-            select(User).where(User.id == contact_id)
-        )
-        if not result.scalar_one_or_none():
+        contact_user = await User.get(contact_oid)
+        if not contact_user:
             raise NotFoundError(message="User not found")
         
         # Check if contact already exists
-        result = await self.db.execute(
-            select(Contact)
-            .where(
-                and_(
-                    Contact.user_id == user_id,
-                    Contact.contact_id == contact_id,
-                )
-            )
+        existing = await Contact.find_one(
+            Contact.user_id == user_oid,
+            Contact.contact_id == contact_oid
         )
-        existing = result.scalar_one_or_none()
         
         if existing:
             if existing.status == ContactStatus.BLOCKED:
@@ -56,147 +47,110 @@ class ContactService:
             raise ConflictError(message="Contact already exists")
         
         # Check if the other user has already added us
-        result = await self.db.execute(
-            select(Contact)
-            .where(
-                and_(
-                    Contact.user_id == contact_id,
-                    Contact.contact_id == user_id,
-                )
-            )
+        reverse_contact = await Contact.find_one(
+            Contact.user_id == contact_oid,
+            Contact.contact_id == user_oid
         )
-        reverse_contact = result.scalar_one_or_none()
         
         # If they added us, auto-accept
         status = ContactStatus.ACCEPTED if reverse_contact else ContactStatus.PENDING
         
         contact = Contact(
-            user_id=user_id,
-            contact_id=contact_id,
+            user_id=user_oid,
+            contact_id=contact_oid,
             nickname=nickname,
             status=status,
+            contact_username=contact_user.username,
+            contact_email=contact_user.email,
         )
         
-        self.db.add(contact)
+        await contact.insert()
         
         # If mutual, accept the reverse contact too
         if reverse_contact and reverse_contact.status == ContactStatus.PENDING:
             reverse_contact.status = ContactStatus.ACCEPTED
+            await reverse_contact.save()
         
-        await self.db.commit()
-        
-        # Re-fetch with relationships loaded
-        result = await self.db.execute(
-            select(Contact)
-            .options(selectinload(Contact.contact_user))
-            .where(Contact.id == contact.id)
-        )
-        return result.scalar_one()
+        return contact
     
     async def accept_contact(self, user_id: str, contact_entry_id: str) -> Contact:
         """Accept a pending contact request."""
-        result = await self.db.execute(
-            select(Contact)
-            .options(selectinload(Contact.user))
-            .where(
-                and_(
-                    Contact.id == contact_entry_id,
-                    Contact.contact_id == user_id,
-                    Contact.status == ContactStatus.PENDING,
-                )
-            )
+        user_oid = PydanticObjectId(user_id)
+        
+        contact = await Contact.find_one(
+            Contact.id == PydanticObjectId(contact_entry_id),
+            Contact.contact_id == user_oid,
+            Contact.status == ContactStatus.PENDING
         )
-        contact = result.scalar_one_or_none()
         
         if not contact:
             raise NotFoundError(message="Contact request not found")
         
         # Accept the request
         contact.status = ContactStatus.ACCEPTED
+        await contact.save()
         
         # Create reverse contact if it doesn't exist
-        result = await self.db.execute(
-            select(Contact)
-            .where(
-                and_(
-                    Contact.user_id == user_id,
-                    Contact.contact_id == contact.user_id,
-                )
-            )
+        reverse_contact = await Contact.find_one(
+            Contact.user_id == user_oid,
+            Contact.contact_id == contact.user_id
         )
-        reverse_contact = result.scalar_one_or_none()
+        
+        # Get the requesting user's info
+        requesting_user = await User.get(contact.user_id)
         
         if not reverse_contact:
             reverse_contact = Contact(
-                user_id=user_id,
+                user_id=user_oid,
                 contact_id=contact.user_id,
                 status=ContactStatus.ACCEPTED,
+                contact_username=requesting_user.username if requesting_user else None,
+                contact_email=requesting_user.email if requesting_user else None,
             )
-            self.db.add(reverse_contact)
+            await reverse_contact.insert()
         else:
             reverse_contact.status = ContactStatus.ACCEPTED
+            await reverse_contact.save()
         
-        await self.db.commit()
-        
-        # Re-fetch with relationships loaded
-        result = await self.db.execute(
-            select(Contact)
-            .options(selectinload(Contact.user))
-            .where(Contact.id == contact.id)
-        )
-        return result.scalar_one()
+        return contact
     
     async def block_contact(self, user_id: str, contact_id: str) -> Contact:
         """Block a user."""
-        result = await self.db.execute(
-            select(Contact)
-            .where(
-                and_(
-                    Contact.user_id == user_id,
-                    Contact.contact_id == contact_id,
-                )
-            )
+        user_oid = PydanticObjectId(user_id)
+        contact_oid = PydanticObjectId(contact_id)
+        
+        contact = await Contact.find_one(
+            Contact.user_id == user_oid,
+            Contact.contact_id == contact_oid
         )
-        contact = result.scalar_one_or_none()
         
         if contact:
             contact.status = ContactStatus.BLOCKED
+            await contact.save()
         else:
             contact = Contact(
-                user_id=user_id,
-                contact_id=contact_id,
+                user_id=user_oid,
+                contact_id=contact_oid,
                 status=ContactStatus.BLOCKED,
             )
-            self.db.add(contact)
+            await contact.insert()
         
-        await self.db.commit()
-        
-        # Re-fetch with relationships loaded
-        result = await self.db.execute(
-            select(Contact)
-            .options(selectinload(Contact.contact_user))
-            .where(Contact.id == contact.id)
-        )
-        return result.scalar_one()
+        return contact
     
     async def remove_contact(self, user_id: str, contact_id: str) -> None:
         """Remove a contact."""
-        result = await self.db.execute(
-            select(Contact)
-            .where(
-                and_(
-                    Contact.user_id == user_id,
-                    Contact.contact_id == contact_id,
-                )
-            )
+        user_oid = PydanticObjectId(user_id)
+        contact_oid = PydanticObjectId(contact_id)
+        
+        contact = await Contact.find_one(
+            Contact.user_id == user_oid,
+            Contact.contact_id == contact_oid
         )
-        contact = result.scalar_one_or_none()
         
         if not contact:
             raise NotFoundError(message="Contact not found")
         
-        await self.db.delete(contact)
-        await self.db.commit()
+        await contact.delete()
     
     async def get_contacts(
         self,
@@ -204,48 +158,48 @@ class ContactService:
         status: Optional[ContactStatus] = None,
     ) -> list[Contact]:
         """Get user's contacts."""
-        stmt = select(Contact).options(
-            selectinload(Contact.contact_user)
-        ).where(Contact.user_id == user_id)
+        user_oid = PydanticObjectId(user_id)
         
+        query = {"user_id": user_oid}
         if status:
-            stmt = stmt.where(Contact.status == status)
+            query["status"] = status.value
         
-        result = await self.db.execute(stmt)
-        return list(result.scalars().all())
+        contacts = await Contact.find(query).to_list()
+        return contacts
     
     async def get_pending_requests(self, user_id: str) -> list[Contact]:
         """Get pending contact requests sent to the user."""
-        result = await self.db.execute(
-            select(Contact)
-            .options(selectinload(Contact.user))
-            .where(
-                and_(
-                    Contact.contact_id == user_id,
-                    Contact.status == ContactStatus.PENDING,
-                )
-            )
-        )
-        return list(result.scalars().all())
+        user_oid = PydanticObjectId(user_id)
+        
+        contacts = await Contact.find(
+            Contact.contact_id == user_oid,
+            Contact.status == ContactStatus.PENDING
+        ).to_list()
+        
+        # Fetch the requesting user info for each contact
+        for contact in contacts:
+            requesting_user = await User.get(contact.user_id)
+            if requesting_user:
+                contact.contact_username = requesting_user.username
+                contact.contact_email = requesting_user.email
+        
+        return contacts
     
     async def is_blocked(self, user_id: str, other_user_id: str) -> bool:
         """Check if either user has blocked the other."""
-        result = await self.db.execute(
-            select(Contact)
-            .where(
-                and_(
-                    or_(
-                        and_(
-                            Contact.user_id == user_id,
-                            Contact.contact_id == other_user_id,
-                        ),
-                        and_(
-                            Contact.user_id == other_user_id,
-                            Contact.contact_id == user_id,
-                        ),
-                    ),
-                    Contact.status == ContactStatus.BLOCKED,
-                )
-            )
-        )
-        return result.scalar_one_or_none() is not None
+        user_oid = PydanticObjectId(user_id)
+        other_oid = PydanticObjectId(other_user_id)
+        
+        blocked = await Contact.find_one({
+            "$and": [
+                {"status": ContactStatus.BLOCKED.value},
+                {
+                    "$or": [
+                        {"user_id": user_oid, "contact_id": other_oid},
+                        {"user_id": other_oid, "contact_id": user_oid}
+                    ]
+                }
+            ]
+        })
+        
+        return blocked is not None

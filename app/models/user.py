@@ -1,96 +1,30 @@
 """
 User model for authentication and profile management.
+Uses Beanie ODM for MongoDB.
 """
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
-import uuid
-
-from sqlalchemy import String, Text, DateTime, Boolean, CHAR
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.database import Base
-
-if TYPE_CHECKING:
-    from app.models.contact import Contact
-    from app.models.conversation import ConversationMember
-    from app.models.message import Message
+from typing import Optional
+from beanie import Document, Indexed
+from pydantic import Field, EmailStr
 
 
-def generate_uuid() -> str:
-    """Generate a UUID string for primary keys."""
-    return str(uuid.uuid4())
-
-
-class User(Base):
+class User(Document):
     """
-    User model representing a registered user.
+    User document representing a registered user.
     """
     
-    __tablename__ = "users"
+    email: Indexed(EmailStr, unique=True)
+    username: Indexed(str, unique=True)
+    password_hash: str
+    public_key: Optional[str] = None
+    avatar_url: Optional[str] = None
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: Optional[datetime] = None
     
-    # Using CHAR(36) for UUID since MySQL doesn't have native UUID type
-    id: Mapped[str] = mapped_column(
-        CHAR(36),
-        primary_key=True,
-        default=generate_uuid,
-    )
-    email: Mapped[str] = mapped_column(
-        String(255),
-        unique=True,
-        nullable=False,
-        index=True,
-    )
-    username: Mapped[str] = mapped_column(
-        String(50),
-        unique=True,
-        nullable=False,
-        index=True,
-    )
-    password_hash: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-    )
-    public_key: Mapped[Optional[str]] = mapped_column(
-        Text,
-        nullable=True,
-    )
-    avatar_url: Mapped[Optional[str]] = mapped_column(
-        String(500),
-        nullable=True,
-    )
-    is_active: Mapped[bool] = mapped_column(
-        Boolean,
-        default=True,
-        nullable=False,
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    last_seen: Mapped[Optional[datetime]] = mapped_column(
-        DateTime,
-        nullable=True,
-    )
-    
-    # Relationships
-    contacts: Mapped[list["Contact"]] = relationship(
-        "Contact",
-        foreign_keys="Contact.user_id",
-        back_populates="user",
-        lazy="selectin",
-    )
-    conversation_memberships: Mapped[list["ConversationMember"]] = relationship(
-        "ConversationMember",
-        back_populates="user",
-        lazy="selectin",
-    )
-    sent_messages: Mapped[list["Message"]] = relationship(
-        "Message",
-        back_populates="sender",
-        lazy="selectin",
-    )
+    class Settings:
+        name = "users"
     
     def __repr__(self) -> str:
         return f"<User(id={self.id}, username={self.username})>"

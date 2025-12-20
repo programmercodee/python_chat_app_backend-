@@ -86,6 +86,17 @@ app.add_middleware(
 )
 
 
+# ==================== ACCESS LOGGING ====================
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests."""
+    logger.info(f"📥 {request.method} {request.url.path}")
+    response = await call_next(request)
+    logger.info(f"📤 {request.method} {request.url.path} -> {response.status_code}")
+    return response
+
+
 # ==================== EXCEPTION HANDLERS ====================
 
 @app.exception_handler(AppException)

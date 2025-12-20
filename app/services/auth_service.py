@@ -1,11 +1,10 @@
 """
 Authentication service for user registration and login.
+Uses Beanie ODM for MongoDB.
 """
 
 from datetime import datetime, timezone
-
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from beanie import PydanticObjectId
 
 from app.core.security import (
     create_access_token,
@@ -24,9 +23,6 @@ from app.config import settings
 class AuthService:
     """Service for handling authentication operations."""
     
-    def __init__(self, db: AsyncSession):
-        self.db = db
-    
     async def register(self, user_data: UserCreate) -> User:
         """
         Register a new user.
@@ -35,17 +31,13 @@ class AuthService:
             Created user instance
         """
         # Check if email already exists
-        result = await self.db.execute(
-            select(User).where(User.email == user_data.email)
-        )
-        if result.scalar_one_or_none():
+        existing_email = await User.find_one(User.email == user_data.email)
+        if existing_email:
             raise ConflictError(message="Email already registered")
         
         # Check if username already exists
-        result = await self.db.execute(
-            select(User).where(User.username == user_data.username)
-        )
-        if result.scalar_one_or_none():
+        existing_username = await User.find_one(User.username == user_data.username)
+        if existing_username:
             raise ConflictError(message="Username already taken")
         
         # Create new user
@@ -55,10 +47,7 @@ class AuthService:
             password_hash=get_password_hash(user_data.password),
         )
         
-        self.db.add(user)
-        await self.db.flush()
-        await self.db.refresh(user)
-        
+        await user.insert()
         return user
     
     async def login(self, email: str, password: str) -> TokenResponse:
@@ -66,10 +55,7 @@ class AuthService:
         Authenticate user and return tokens.
         """
         # Find user by email
-        result = await self.db.execute(
-            select(User).where(User.email == email)
-        )
-        user = result.scalar_one_or_none()
+        user = await User.find_one(User.email == email)
         
         if not user or not verify_password(password, user.password_hash):
             raise AuthenticationError(message="Invalid email or password")
@@ -79,11 +65,11 @@ class AuthService:
         
         # Update last seen
         user.last_seen = datetime.now(timezone.utc)
-        await self.db.flush()
+        await user.save()
         
         # Generate tokens
-        access_token = create_access_token(subject=user.id)
-        refresh_token = create_refresh_token(subject=user.id)
+        access_token = create_access_token(subject=str(user.id))
+        refresh_token = create_refresh_token(subject=str(user.id))
         
         return TokenResponse(
             access_token=access_token,
@@ -100,17 +86,17 @@ class AuthService:
         user_id = payload.get("sub")
         
         # Verify user still exists and is active
-        result = await self.db.execute(
-            select(User).where(User.id == user_id)
-        )
-        user = result.scalar_one_or_none()
+        try:
+            user = await User.get(PydanticObjectId(user_id))
+        except Exception:
+            user = None
         
         if not user or not user.is_active:
             raise AuthenticationError(message="User not found or inactive")
         
         # Generate new tokens
-        access_token = create_access_token(subject=user.id)
-        new_refresh_token = create_refresh_token(subject=user.id)
+        access_token = create_access_token(subject=str(user.id))
+        new_refresh_token = create_refresh_token(subject=str(user.id))
         
         return TokenResponse(
             access_token=access_token,
@@ -120,7 +106,7 @@ class AuthService:
     
     async def get_user_by_id(self, user_id: str) -> User | None:
         """Get user by ID."""
-        result = await self.db.execute(
-            select(User).where(User.id == user_id)
-        )
-        return result.scalar_one_or_none()
+        try:
+            return await User.get(PydanticObjectId(user_id))
+        except Exception:
+            return None

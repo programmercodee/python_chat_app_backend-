@@ -1,132 +1,59 @@
 """
-Conversation and ConversationMember models.
-Supports both direct messages and group chats.
+Conversation model for chats.
+Uses Beanie ODM for MongoDB.
 """
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Optional
-import uuid
-
-from sqlalchemy import String, DateTime, ForeignKey, Enum as SQLEnum, UniqueConstraint, CHAR
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.database import Base
-
-if TYPE_CHECKING:
-    from app.models.user import User
-    from app.models.message import Message
-
-
-def generate_uuid() -> str:
-    """Generate a UUID string for primary keys."""
-    return str(uuid.uuid4())
+from typing import Optional, List
+from beanie import Document, PydanticObjectId
+from pydantic import Field
 
 
 class ConversationType(str, Enum):
     """Type of conversation."""
-    DIRECT = "direct"  # One-on-one chat
-    GROUP = "group"    # Group chat
+    DIRECT = "direct"
+    GROUP = "group"
 
 
-class Conversation(Base):
+class ConversationMember(Document):
     """
-    Conversation model representing a chat (direct or group).
-    """
-    
-    __tablename__ = "conversations"
-    
-    id: Mapped[str] = mapped_column(
-        CHAR(36),
-        primary_key=True,
-        default=generate_uuid,
-    )
-    type: Mapped[ConversationType] = mapped_column(
-        SQLEnum(ConversationType),
-        default=ConversationType.DIRECT,
-        nullable=False,
-    )
-    name: Mapped[Optional[str]] = mapped_column(
-        String(100),
-        nullable=True,
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    
-    # Relationships
-    members: Mapped[list["ConversationMember"]] = relationship(
-        "ConversationMember",
-        back_populates="conversation",
-        lazy="selectin",
-        cascade="all, delete-orphan",
-    )
-    messages: Mapped[list["Message"]] = relationship(
-        "Message",
-        back_populates="conversation",
-        lazy="selectin",
-        cascade="all, delete-orphan",
-        order_by="Message.created_at",
-    )
-    
-    def __repr__(self) -> str:
-        return f"<Conversation(id={self.id}, type={self.type.value})>"
-
-
-class ConversationMember(Base):
-    """
-    Association table for users in conversations.
+    Conversation member document for tracking users in conversations.
     """
     
-    __tablename__ = "conversation_members"
-    __table_args__ = (
-        UniqueConstraint("conversation_id", "user_id", name="uq_conversation_member"),
-    )
+    conversation_id: PydanticObjectId = Field(..., index=True)
+    user_id: PydanticObjectId = Field(..., index=True)
+    joined_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_read_at: Optional[datetime] = None
     
-    id: Mapped[str] = mapped_column(
-        CHAR(36),
-        primary_key=True,
-        default=generate_uuid,
-    )
-    conversation_id: Mapped[str] = mapped_column(
-        CHAR(36),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    user_id: Mapped[str] = mapped_column(
-        CHAR(36),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    joined_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    last_read_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime,
-        nullable=True,
-    )
+    # Denormalized user info for quick access
+    username: Optional[str] = None
     
-    # Relationships
-    conversation: Mapped["Conversation"] = relationship(
-        "Conversation",
-        back_populates="members",
-    )
-    user: Mapped["User"] = relationship(
-        "User",
-        back_populates="conversation_memberships",
-    )
+    class Settings:
+        name = "conversation_members"
+        indexes = [
+            [("conversation_id", 1), ("user_id", 1)],
+        ]
     
     def __repr__(self) -> str:
         return f"<ConversationMember(conversation={self.conversation_id}, user={self.user_id})>"
+
+
+class Conversation(Document):
+    """
+    Conversation document representing a chat (direct or group).
+    """
+    
+    type: ConversationType = ConversationType.DIRECT
+    name: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    # Store member user IDs for quick lookup
+    member_ids: List[PydanticObjectId] = []
+    
+    class Settings:
+        name = "conversations"
+    
+    def __repr__(self) -> str:
+        return f"<Conversation(id={self.id}, type={self.type.value})>"

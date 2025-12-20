@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     debug: bool = False
     secret_key: str
     
-    # Database
-    database_url: str
+    # MongoDB Database
+    mongodb_url: str
     
     # Redis
     redis_url: str = "redis://localhost:6379/0"

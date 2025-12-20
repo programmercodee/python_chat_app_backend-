@@ -1,74 +1,56 @@
 """
-Async database connection setup using SQLAlchemy 2.0.
-Provides session factory and base model for all database models.
+MongoDB database connection setup using Motor and Beanie ODM.
+Provides async MongoDB client and document initialization.
 """
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.pool import NullPool
+from motor.motor_asyncio import AsyncIOMotorClient
+from beanie import init_beanie
 
 from app.config import settings
 
-
-# Create async engine with connection pooling disabled for serverless compatibility
-# For production with persistent servers, remove poolclass=NullPool
-engine = create_async_engine(
-    settings.database_url,
-    echo=settings.debug,  # Log SQL queries in debug mode
-    poolclass=NullPool,
-)
-
-# Session factory for creating database sessions
-async_session_maker = async_sessionmaker(
-    engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autocommit=False,
-    autoflush=False,
-)
-
-
-class Base(DeclarativeBase):
-    """
-    Base class for all SQLAlchemy models.
-    All models should inherit from this class.
-    """
-    pass
-
-
-async def get_db() -> AsyncSession:
-    """
-    Dependency for getting async database sessions.
-    Use with FastAPI's Depends() for automatic session management.
-    
-    Usage:
-        @app.get("/items")
-        async def get_items(db: AsyncSession = Depends(get_db)):
-            ...
-    """
-    async with async_session_maker() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-        finally:
-            await session.close()
+# MongoDB client instance
+client: AsyncIOMotorClient = None
 
 
 async def init_db():
     """
-    Initialize database tables.
+    Initialize MongoDB connection and Beanie ODM.
     Call this on application startup.
     """
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    global client
+    
+    # Create MongoDB client
+    client = AsyncIOMotorClient(settings.mongodb_url)
+    
+    # Use explicit database name
+    db = client["chat_app"]
+    
+    # Import all document models
+    from app.models.user import User
+    from app.models.conversation import Conversation, ConversationMember
+    from app.models.message import Message
+    from app.models.contact import Contact
+    
+    # Initialize Beanie with document models
+    await init_beanie(
+        database=db,
+        document_models=[User, Conversation, ConversationMember, Message, Contact]
+    )
+    
+    print(f"Connected to MongoDB database: {db.name}")
 
 
 async def close_db():
     """
-    Close database connections.
+    Close MongoDB connection.
     Call this on application shutdown.
     """
-    await engine.dispose()
+    global client
+    if client:
+        client.close()
+        print("MongoDB connection closed")
+
+
+def get_client() -> AsyncIOMotorClient:
+    """Get the MongoDB client instance."""
+    return client

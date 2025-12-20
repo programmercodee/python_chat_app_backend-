@@ -1,12 +1,12 @@
 """
 Message service for handling chat messages.
+Uses Beanie ODM for MongoDB.
 """
 
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select, update, and_
-from sqlalchemy.ext.asyncio import AsyncSession
+from beanie import PydanticObjectId
 
 from app.core.exceptions import NotFoundError, AuthorizationError
 from app.models.message import Message
@@ -16,9 +16,6 @@ from app.schemas.message import MessageList, MessageResponse
 
 class MessageService:
     """Service for managing chat messages."""
-    
-    def __init__(self, db: AsyncSession):
-        self.db = db
     
     async def create_message(
         self,
@@ -31,42 +28,42 @@ class MessageService:
         """
         Create a new encrypted message.
         """
+        sender_oid = PydanticObjectId(sender_id)
+        conv_oid = PydanticObjectId(conversation_id)
+        
         # Verify sender is member of conversation
         await self._verify_membership(sender_id, conversation_id)
         
         message = Message(
-            conversation_id=conversation_id,
-            sender_id=sender_id,
+            conversation_id=conv_oid,
+            sender_id=sender_oid,
             encrypted_content=encrypted_content,
             nonce=nonce,
             content_type=content_type,
         )
         
-        self.db.add(message)
-        await self.db.flush()
-        await self.db.refresh(message)
+        await message.insert()
         
         # Update conversation's updated_at
-        await self.db.execute(
-            update(Conversation)
-            .where(Conversation.id == conversation_id)
-            .values(updated_at=datetime.now(timezone.utc))
-        )
+        conversation = await Conversation.get(conv_oid)
+        if conversation:
+            conversation.updated_at = datetime.now(timezone.utc)
+            await conversation.save()
         
         return message
     
     async def get_message(self, message_id: str, user_id: str) -> Message:
         """Get a single message by ID."""
-        result = await self.db.execute(
-            select(Message).where(Message.id == message_id)
-        )
-        message = result.scalar_one_or_none()
+        try:
+            message = await Message.get(PydanticObjectId(message_id))
+        except Exception:
+            message = None
         
         if not message:
             raise NotFoundError(message="Message not found")
         
         # Verify user has access
-        await self._verify_membership(user_id, message.conversation_id)
+        await self._verify_membership(user_id, str(message.conversation_id))
         
         return message
     
@@ -81,40 +78,48 @@ class MessageService:
         """
         Get paginated messages for a conversation.
         """
+        conv_oid = PydanticObjectId(conversation_id)
+        
         # Verify membership
         await self._verify_membership(user_id, conversation_id)
         
         # Build query
-        stmt = select(Message).where(
-            Message.conversation_id == conversation_id
-        )
+        query = {"conversation_id": conv_oid}
         
         if before:
-            stmt = stmt.where(Message.created_at < before)
-        
-        # Order by newest first, then paginate
-        stmt = stmt.order_by(Message.created_at.desc())
+            query["created_at"] = {"$lt": before}
         
         # Get total count
-        count_result = await self.db.execute(
-            select(Message.id).where(
-                Message.conversation_id == conversation_id
-            )
-        )
-        total = len(count_result.all())
+        total = await Message.find({"conversation_id": conv_oid}).count()
         
-        # Apply pagination
+        # Get paginated messages (newest first, then reverse)
         offset = (page - 1) * page_size
-        stmt = stmt.offset(offset).limit(page_size)
-        
-        result = await self.db.execute(stmt)
-        messages = list(result.scalars().all())
+        messages = await Message.find(query)\
+            .sort("-created_at")\
+            .skip(offset)\
+            .limit(page_size)\
+            .to_list()
         
         # Reverse to get chronological order
         messages.reverse()
         
+        # Convert to response objects
+        message_responses = []
+        for m in messages:
+            message_responses.append(MessageResponse(
+                id=str(m.id),
+                conversation_id=str(m.conversation_id),
+                sender_id=str(m.sender_id) if m.sender_id else None,
+                encrypted_content=m.encrypted_content,
+                nonce=m.nonce,
+                content_type=m.content_type,
+                is_delivered=m.is_delivered,
+                is_read=m.is_read,
+                created_at=m.created_at
+            ))
+        
         return MessageList(
-            messages=[MessageResponse.model_validate(m) for m in messages],
+            messages=message_responses,
             total=total,
             page=page,
             page_size=page_size,
@@ -123,86 +128,70 @@ class MessageService:
     
     async def mark_as_delivered(self, message_id: str) -> None:
         """Mark a message as delivered."""
-        await self.db.execute(
-            update(Message)
-            .where(Message.id == message_id)
-            .values(is_delivered=True)
-        )
+        try:
+            message = await Message.get(PydanticObjectId(message_id))
+            if message:
+                message.is_delivered = True
+                await message.save()
+        except Exception:
+            pass
     
     async def mark_as_read(self, message_ids: list[str], user_id: str) -> None:
         """Mark multiple messages as read."""
-        await self.db.execute(
-            update(Message)
-            .where(
-                and_(
-                    Message.id.in_(message_ids),
-                    Message.sender_id != user_id,
-                )
-            )
-            .values(is_read=True)
-        )
+        user_oid = PydanticObjectId(user_id)
+        msg_oids = [PydanticObjectId(mid) for mid in message_ids]
+        
+        # Update messages that weren't sent by this user
+        await Message.find({
+            "_id": {"$in": msg_oids},
+            "sender_id": {"$ne": user_oid}
+        }).update_many({"$set": {"is_read": True}})
+        
+        # Get conversation IDs for these messages
+        messages = await Message.find({"_id": {"$in": msg_oids}}).to_list()
+        conv_ids = list(set(m.conversation_id for m in messages))
         
         # Update member's last_read_at
-        result = await self.db.execute(
-            select(Message.conversation_id)
-            .where(Message.id.in_(message_ids))
-            .distinct()
-        )
-        conversation_ids = [row[0] for row in result.all()]
-        
-        for conv_id in conversation_ids:
-            await self.db.execute(
-                update(ConversationMember)
-                .where(
-                    and_(
-                        ConversationMember.conversation_id == conv_id,
-                        ConversationMember.user_id == user_id,
-                    )
-                )
-                .values(last_read_at=datetime.now(timezone.utc))
+        for conv_id in conv_ids:
+            member = await ConversationMember.find_one(
+                ConversationMember.conversation_id == conv_id,
+                ConversationMember.user_id == user_oid
             )
+            if member:
+                member.last_read_at = datetime.now(timezone.utc)
+                await member.save()
     
     async def get_unread_count(self, conversation_id: str, user_id: str) -> int:
         """Get count of unread messages for a user in a conversation."""
-        result = await self.db.execute(
-            select(ConversationMember.last_read_at)
-            .where(
-                and_(
-                    ConversationMember.conversation_id == conversation_id,
-                    ConversationMember.user_id == user_id,
-                )
-            )
+        conv_oid = PydanticObjectId(conversation_id)
+        user_oid = PydanticObjectId(user_id)
+        
+        member = await ConversationMember.find_one(
+            ConversationMember.conversation_id == conv_oid,
+            ConversationMember.user_id == user_oid
         )
-        row = result.first()
-        last_read_at = row[0] if row else None
+        
+        last_read_at = member.last_read_at if member else None
         
         # Count messages after last read
-        stmt = select(Message.id).where(
-            and_(
-                Message.conversation_id == conversation_id,
-                Message.sender_id != user_id,
-            )
-        )
+        query = {
+            "conversation_id": conv_oid,
+            "sender_id": {"$ne": user_oid}
+        }
         
         if last_read_at:
-            stmt = stmt.where(Message.created_at > last_read_at)
+            query["created_at"] = {"$gt": last_read_at}
         
-        result = await self.db.execute(stmt)
-        return len(result.all())
+        return await Message.find(query).count()
     
     async def _verify_membership(self, user_id: str, conversation_id: str) -> None:
         """Verify user is a member of the conversation."""
-        result = await self.db.execute(
-            select(ConversationMember)
-            .where(
-                and_(
-                    ConversationMember.conversation_id == conversation_id,
-                    ConversationMember.user_id == user_id,
-                )
-            )
-        )
+        user_oid = PydanticObjectId(user_id)
+        conv_oid = PydanticObjectId(conversation_id)
         
-        if not result.scalar_one_or_none():
+        conversation = await Conversation.get(conv_oid)
+        
+        if not conversation or user_oid not in conversation.member_ids:
             raise AuthorizationError(
                 message="You are not a member of this conversation"
             )

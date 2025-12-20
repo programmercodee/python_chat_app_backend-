@@ -1,12 +1,12 @@
 """
 Conversation service for managing chats.
+Uses Beanie ODM for MongoDB.
 """
 
+from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select, and_, func
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from beanie import PydanticObjectId
 
 from app.core.exceptions import NotFoundError, AuthorizationError, ValidationError
 from app.models.conversation import Conversation, ConversationMember, ConversationType
@@ -15,9 +15,6 @@ from app.models.user import User
 
 class ConversationService:
     """Service for managing conversations."""
-    
-    def __init__(self, db: AsyncSession):
-        self.db = db
     
     async def create_direct_conversation(
         self,
@@ -30,44 +27,45 @@ class ConversationService:
         if user_id == other_user_id:
             raise ValidationError(message="Cannot create conversation with yourself")
         
+        user_oid = PydanticObjectId(user_id)
+        other_oid = PydanticObjectId(other_user_id)
+        
         # Check if direct conversation already exists
         existing = await self._get_direct_conversation(user_id, other_user_id)
         if existing:
             return existing
         
         # Verify other user exists
-        result = await self.db.execute(
-            select(User).where(User.id == other_user_id)
-        )
-        if not result.scalar_one_or_none():
+        other_user = await User.get(other_oid)
+        if not other_user:
             raise NotFoundError(message="User not found")
         
-        # Create new conversation
-        conversation = Conversation(type=ConversationType.DIRECT)
-        self.db.add(conversation)
-        await self.db.flush()
+        # Get current user
+        current_user = await User.get(user_oid)
         
-        # Add both members
+        # Create new conversation
+        conversation = Conversation(
+            type=ConversationType.DIRECT,
+            member_ids=[user_oid, other_oid]
+        )
+        await conversation.insert()
+        
+        # Create member entries
         member1 = ConversationMember(
             conversation_id=conversation.id,
-            user_id=user_id,
+            user_id=user_oid,
+            username=current_user.username if current_user else None
         )
         member2 = ConversationMember(
             conversation_id=conversation.id,
-            user_id=other_user_id,
+            user_id=other_oid,
+            username=other_user.username
         )
         
-        self.db.add(member1)
-        self.db.add(member2)
-        await self.db.commit()
+        await member1.insert()
+        await member2.insert()
         
-        # Re-fetch with relationships loaded
-        result = await self.db.execute(
-            select(Conversation)
-            .options(selectinload(Conversation.members).selectinload(ConversationMember.user))
-            .where(Conversation.id == conversation.id)
-        )
-        return result.scalar_one()
+        return conversation
     
     async def create_group_conversation(
         self,
@@ -84,40 +82,34 @@ class ConversationService:
         if len(all_member_ids) < 2:
             raise ValidationError(message="Group must have at least 2 members")
         
-        # Verify all members exist
-        result = await self.db.execute(
-            select(User.id).where(User.id.in_(all_member_ids))
-        )
-        found_ids = {row[0] for row in result.all()}
+        # Convert to ObjectIds
+        member_oids = [PydanticObjectId(mid) for mid in all_member_ids]
         
-        if len(found_ids) != len(all_member_ids):
+        # Verify all members exist
+        found_users = await User.find({"_id": {"$in": member_oids}}).to_list()
+        found_ids = {user.id for user in found_users}
+        
+        if len(found_ids) != len(member_oids):
             raise NotFoundError(message="One or more users not found")
         
         # Create conversation
         conversation = Conversation(
             type=ConversationType.GROUP,
             name=name,
+            member_ids=member_oids
         )
-        self.db.add(conversation)
-        await self.db.flush()
+        await conversation.insert()
         
-        # Add members
-        for member_id in all_member_ids:
+        # Add member entries
+        for user in found_users:
             member = ConversationMember(
                 conversation_id=conversation.id,
-                user_id=member_id,
+                user_id=user.id,
+                username=user.username
             )
-            self.db.add(member)
+            await member.insert()
         
-        await self.db.commit()
-        
-        # Re-fetch with relationships loaded
-        result = await self.db.execute(
-            select(Conversation)
-            .options(selectinload(Conversation.members).selectinload(ConversationMember.user))
-            .where(Conversation.id == conversation.id)
-        )
-        return result.scalar_one()
+        return conversation
     
     async def get_conversation(
         self,
@@ -127,46 +119,60 @@ class ConversationService:
         """
         Get conversation by ID with membership check.
         """
-        result = await self.db.execute(
-            select(Conversation)
-            .options(selectinload(Conversation.members).selectinload(ConversationMember.user))
-            .where(Conversation.id == conversation_id)
-        )
-        conversation = result.scalar_one_or_none()
+        conv_oid = PydanticObjectId(conversation_id)
+        user_oid = PydanticObjectId(user_id)
+        
+        conversation = await Conversation.get(conv_oid)
         
         if not conversation:
             raise NotFoundError(message="Conversation not found")
         
         # Check membership
-        is_member = any(m.user_id == user_id for m in conversation.members)
-        if not is_member:
+        if user_oid not in conversation.member_ids:
             raise AuthorizationError(message="You are not a member of this conversation")
         
         return conversation
     
-    async def get_user_conversations(self, user_id: str) -> list[Conversation]:
+    async def get_user_conversations(self, user_id: str) -> list[dict]:
         """
-        Get all conversations for a user.
+        Get all conversations for a user with member details.
         """
-        # Get conversation IDs for user
-        result = await self.db.execute(
-            select(ConversationMember.conversation_id)
-            .where(ConversationMember.user_id == user_id)
-        )
-        conversation_ids = [row[0] for row in result.all()]
+        user_oid = PydanticObjectId(user_id)
         
-        if not conversation_ids:
-            return []
+        # Find all conversations where user is a member
+        conversations = await Conversation.find(
+            {"member_ids": user_oid}
+        ).sort("-updated_at").to_list()
         
-        # Get conversations with members loaded
-        result = await self.db.execute(
-            select(Conversation)
-            .options(selectinload(Conversation.members).selectinload(ConversationMember.user))
-            .where(Conversation.id.in_(conversation_ids))
-            .order_by(Conversation.updated_at.desc())
-        )
+        result = []
+        for conv in conversations:
+            # Get member details
+            members = await ConversationMember.find(
+                ConversationMember.conversation_id == conv.id
+            ).to_list()
+            
+            # Build member info from User collection for latest data
+            member_details = []
+            for member in members:
+                user = await User.get(member.user_id)
+                if user:
+                    member_details.append({
+                        "user_id": str(user.id),
+                        "username": user.username,
+                        "email": user.email,
+                        "avatar_url": user.avatar_url
+                    })
+            
+            result.append({
+                "id": str(conv.id),
+                "type": conv.type.value,
+                "name": conv.name,
+                "created_at": conv.created_at.isoformat(),
+                "updated_at": conv.updated_at.isoformat(),
+                "members": member_details
+            })
         
-        return list(result.scalars().all())
+        return result
     
     async def add_member(
         self,
@@ -180,40 +186,30 @@ class ConversationService:
         if conversation.type != ConversationType.GROUP:
             raise ValidationError(message="Cannot add members to direct conversations")
         
+        user_oid = PydanticObjectId(user_id)
+        
         # Check if already a member
-        existing = await self.db.execute(
-            select(ConversationMember)
-            .where(
-                and_(
-                    ConversationMember.conversation_id == conversation_id,
-                    ConversationMember.user_id == user_id,
-                )
-            )
-        )
-        if existing.scalar_one_or_none():
+        if user_oid in conversation.member_ids:
             raise ValidationError(message="User is already a member")
         
         # Verify user exists
-        result = await self.db.execute(
-            select(User).where(User.id == user_id)
-        )
-        if not result.scalar_one_or_none():
+        user = await User.get(user_oid)
+        if not user:
             raise NotFoundError(message="User not found")
         
-        member = ConversationMember(
-            conversation_id=conversation_id,
-            user_id=user_id,
-        )
-        self.db.add(member)
-        await self.db.commit()
+        # Add to conversation
+        conversation.member_ids.append(user_oid)
+        await conversation.save()
         
-        # Re-fetch with relationships
-        result = await self.db.execute(
-            select(ConversationMember)
-            .options(selectinload(ConversationMember.user))
-            .where(ConversationMember.id == member.id)
+        # Create member entry
+        member = ConversationMember(
+            conversation_id=conversation.id,
+            user_id=user_oid,
+            username=user.username
         )
-        return result.scalar_one()
+        await member.insert()
+        
+        return member
     
     async def remove_member(
         self,
@@ -227,22 +223,20 @@ class ConversationService:
         if conversation.type != ConversationType.GROUP:
             raise ValidationError(message="Cannot remove members from direct conversations")
         
-        result = await self.db.execute(
-            select(ConversationMember)
-            .where(
-                and_(
-                    ConversationMember.conversation_id == conversation_id,
-                    ConversationMember.user_id == user_id,
-                )
-            )
-        )
-        member = result.scalar_one_or_none()
+        user_oid = PydanticObjectId(user_id)
         
-        if not member:
+        if user_oid not in conversation.member_ids:
             raise NotFoundError(message="Member not found in conversation")
         
-        await self.db.delete(member)
-        await self.db.commit()
+        # Remove from conversation
+        conversation.member_ids.remove(user_oid)
+        await conversation.save()
+        
+        # Remove member entry
+        await ConversationMember.find_one(
+            ConversationMember.conversation_id == conversation.id,
+            ConversationMember.user_id == user_oid
+        ).delete()
     
     async def _get_direct_conversation(
         self,
@@ -250,33 +244,25 @@ class ConversationService:
         user2_id: str,
     ) -> Optional[Conversation]:
         """Get existing direct conversation between two users."""
-        # Find conversations where both users are members
-        subquery1 = (
-            select(ConversationMember.conversation_id)
-            .where(ConversationMember.user_id == user1_id)
-        )
-        subquery2 = (
-            select(ConversationMember.conversation_id)
-            .where(ConversationMember.user_id == user2_id)
-        )
+        user1_oid = PydanticObjectId(user1_id)
+        user2_oid = PydanticObjectId(user2_id)
         
-        result = await self.db.execute(
-            select(Conversation)
-            .options(selectinload(Conversation.members).selectinload(ConversationMember.user))
-            .where(
-                and_(
-                    Conversation.type == ConversationType.DIRECT,
-                    Conversation.id.in_(subquery1),
-                    Conversation.id.in_(subquery2),
-                )
-            )
-        )
-        conversations = result.scalars().all()
+        # Find direct conversation with both users as members
+        conversation = await Conversation.find_one({
+            "type": ConversationType.DIRECT.value,
+            "member_ids": {"$all": [user1_oid, user2_oid]},
+            "$expr": {"$eq": [{"$size": "$member_ids"}, 2]}
+        })
         
-        # Find one that has exactly these two members
-        for conv in conversations:
-            member_ids = {m.user_id for m in conv.members}
-            if member_ids == {user1_id, user2_id}:
-                return conv
-        
-        return None
+        return conversation
+    
+    async def update_conversation_timestamp(self, conversation_id: str) -> None:
+        """Update the conversation's updated_at timestamp."""
+        try:
+            conv_oid = PydanticObjectId(conversation_id)
+            conversation = await Conversation.get(conv_oid)
+            if conversation:
+                conversation.updated_at = datetime.now(timezone.utc)
+                await conversation.save()
+        except Exception:
+            pass

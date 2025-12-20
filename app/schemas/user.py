@@ -1,11 +1,12 @@
 """
 User schemas for request/response validation.
+Works with MongoDB ObjectId by converting to string.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
-from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 
 
 class UserBase(BaseModel):
@@ -44,6 +45,12 @@ class UserResponse(UserBase):
     last_seen: Optional[datetime] = None
     
     model_config = ConfigDict(from_attributes=True)
+    
+    @field_validator('id', mode='before')
+    @classmethod
+    def convert_id_to_string(cls, v: Any) -> str:
+        """Convert MongoDB ObjectId to string."""
+        return str(v) if v else ""
 
 
 class UserPublicKey(BaseModel):
