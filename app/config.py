@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
     
+    # Cloudinary (Image Upload)
+    cloudinary_cloud_name: str = ""
+    cloudinary_api_key: str = ""
+    cloudinary_api_secret: str = ""
+    
     # Socket.IO / CORS - Allow Vite dev server
     socketio_cors_origins: str = '["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]'
     

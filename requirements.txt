@@ -31,3 +31,6 @@ httpx>=0.26.0
 
 # Development
 python-dotenv>=1.0.0
+
+# File Upload (Cloudinary)
+cloudinary>=1.36.0

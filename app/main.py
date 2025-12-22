@@ -16,7 +16,9 @@ from app.config import settings
 from app.database import init_db, close_db
 from app.core.redis import redis_client
 from app.core.exceptions import AppException
+from app.core.cloudinary_config import init_cloudinary
 from app.api import api_router
+from app.api.upload import router as upload_router
 from app.sockets import sio, register_socket_events
 from app.logging_config import logger
 
@@ -47,6 +49,14 @@ async def lifespan(app: FastAPI):
     # Register socket event handlers
     register_socket_events()
     logger.info("✅ Socket.IO events registered")
+    
+    # Initialize Cloudinary for image uploads
+    try:
+        init_cloudinary()
+        logger.info("✅ Cloudinary initialized")
+    except Exception as e:
+        logger.warning(f"⚠️ Cloudinary init failed: {e}")
+        logger.warning("   (Avatar uploads may not work)")
     
     logger.info("🎉 Server is ready!")
     logger.info("   API Docs: http://localhost:8000/docs")
@@ -142,6 +152,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 # ==================== ROUTES ====================
 
 app.include_router(api_router, prefix="/api/v1")
+app.include_router(upload_router, prefix="/api/v1")  # Avatar upload endpoint
 
 
 @app.get("/health", tags=["Health"])

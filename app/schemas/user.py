@@ -12,7 +12,8 @@ from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 class UserBase(BaseModel):
     """Base schema with common user fields."""
     email: EmailStr
-    username: str = Field(min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_]+$")
+    # Allow letters, numbers, underscores, and spaces in usernames
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_ ]+$")
 
 
 class UserCreate(UserBase):
