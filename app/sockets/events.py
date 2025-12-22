@@ -40,11 +40,31 @@ def register_socket_events():
             socket_manager.connect(user_id, sid)
             await sio.save_session(sid, {'user_id': user_id})
             
+            # Broadcast online status
             await sio.emit(
                 'user_online',
                 {'user_id': user_id, 'timestamp': datetime.now(timezone.utc).isoformat()},
                 skip_sid=sid,
             )
+            
+            # Handle offline delivery - mark pending messages as delivered
+            try:
+                message_service = MessageService()
+                delivered_messages = await message_service.mark_messages_delivered_on_connect(user_id)
+                
+                # Notify senders that their messages were delivered
+                for message in delivered_messages:
+                    sender_socket = socket_manager.get_socket_id(str(message.sender_id))
+                    if sender_socket:
+                        await sio.emit('message_status_update', {
+                            'message_id': str(message.id),
+                            'status': 'delivered',
+                        }, to=sender_socket)
+                
+                if delivered_messages:
+                    logger.info(f"[Socket] Delivered {len(delivered_messages)} offline messages to {user_id}")
+            except Exception as e:
+                logger.exception(f"[Socket] Error handling offline delivery: {e}")
             
             logger.info(f"[Socket] ✅ User {user_id} connected ({sid})")
             return True
@@ -117,16 +137,24 @@ def register_socket_events():
                 'encrypted_content': message.encrypted_content,
                 'nonce': message.nonce,
                 'content_type': message.content_type,
+                'status': message.status,
                 'created_at': message.created_at.isoformat(),
             }
             
-            # Emit to all members
+            # 1. Send ACK back to sender (message_sent event)
+            await sio.emit('message_sent', {
+                'nonce': data['nonce'],  # For matching pending message
+                'message_id': str(message.id),
+                'status': 'sent',
+                'created_at': message.created_at.isoformat(),
+            }, to=sid)
+            
+            # 2. Emit to other members (not sender)
             for member_id in conversation.member_ids:
-                member_socket = socket_manager.get_socket_id(str(member_id))
-                if member_socket:
-                    await sio.emit('new_message', message_data, to=member_socket)
-                    if str(member_id) != sender_id:
-                        await message_service.mark_as_delivered(str(message.id))
+                if str(member_id) != sender_id:
+                    member_socket = socket_manager.get_socket_id(str(member_id))
+                    if member_socket:
+                        await sio.emit('new_message', message_data, to=member_socket)
             
             logger.info(f"[Socket] 📨 Message {message.id} sent by {sender_id}")
                 
@@ -146,22 +174,49 @@ def register_socket_events():
         
         try:
             message_service = MessageService()
-            await message_service.mark_as_read(data['message_ids'], user_id)
+            updated_messages = await message_service.mark_as_read(data['message_ids'], user_id)
             
-            await sio.emit(
-                'messages_read',
-                {
-                    'message_ids': data['message_ids'],
-                    'read_by': user_id,
-                    'read_at': datetime.now(timezone.utc).isoformat(),
-                },
-                skip_sid=sid,
-            )
+            # Notify senders that their messages were read
+            for message in updated_messages:
+                sender_socket = socket_manager.get_socket_id(str(message.sender_id))
+                if sender_socket:
+                    await sio.emit('message_status_update', {
+                        'message_id': str(message.id),
+                        'status': 'read',
+                    }, to=sender_socket)
             
-            logger.debug(f"[Socket] User {user_id} read {len(data['message_ids'])} messages")
+            logger.debug(f"[Socket] User {user_id} read {len(updated_messages)} messages")
             
         except Exception as e:
             logger.exception(f"[Socket] Error marking messages read: {e}")
+    
+    
+    @sio.event
+    async def message_delivered(sid, data):
+        """Handle delivery confirmation from receiver."""
+        session = await sio.get_session(sid)
+        user_id = session.get('user_id')
+        
+        if not user_id or 'message_id' not in data:
+            return
+        
+        try:
+            message_service = MessageService()
+            message = await message_service.mark_as_delivered(data['message_id'])
+            
+            if message:
+                # Notify the sender that message was delivered
+                sender_socket = socket_manager.get_socket_id(str(message.sender_id))
+                if sender_socket:
+                    await sio.emit('message_status_update', {
+                        'message_id': str(message.id),
+                        'status': 'delivered',
+                    }, to=sender_socket)
+                
+                logger.debug(f"[Socket] Message {message.id} delivered to {user_id}")
+                
+        except Exception as e:
+            logger.exception(f"[Socket] Error marking message delivered: {e}")
     
     
     # ==================== TYPING EVENTS ====================

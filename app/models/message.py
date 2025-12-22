@@ -25,6 +25,9 @@ class Message(Document):
     # Nonce for AES-GCM decryption
     nonce: str
     
+
+    status: str = "sent"  # "sent" | "delivered" | "read"
+
     # Content type for proper rendering on client
     content_type: str = "text"
     

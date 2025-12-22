@@ -113,8 +113,9 @@ class MessageService:
                 encrypted_content=m.encrypted_content,
                 nonce=m.nonce,
                 content_type=m.content_type,
-                is_delivered=m.is_delivered,
-                is_read=m.is_read,
+                status=m.status,  # Use status instead of is_delivered/is_read
+                is_delivered=m.status in ['delivered', 'read'],
+                is_read=m.status == 'read',
                 created_at=m.created_at
             ))
         
@@ -126,32 +127,37 @@ class MessageService:
             has_more=offset + len(messages) < total,
         )
     
-    async def mark_as_delivered(self, message_id: str) -> None:
-        """Mark a message as delivered."""
+    async def mark_as_delivered(self, message_id: str) -> Optional[Message]:
+        """Mark a message as delivered. Returns the message if updated."""
         try:
             message = await Message.get(PydanticObjectId(message_id))
-            if message:
-                message.is_delivered = True
+            if message and message.status == "sent":  # Only upgrade from 'sent'
+                message.status = "delivered"
                 await message.save()
+                return message
         except Exception:
             pass
+        return None
     
-    async def mark_as_read(self, message_ids: list[str], user_id: str) -> None:
-        """Mark multiple messages as read."""
+    async def mark_as_read(self, message_ids: list[str], user_id: str) -> list[Message]:
+        """Mark multiple messages as read. Returns list of updated messages."""
         user_oid = PydanticObjectId(user_id)
         msg_oids = [PydanticObjectId(mid) for mid in message_ids]
         
-        # Update messages that weren't sent by this user
-        await Message.find({
+        # Find messages that need to be updated
+        messages_to_update = await Message.find({
             "_id": {"$in": msg_oids},
-            "sender_id": {"$ne": user_oid}
-        }).update_many({"$set": {"is_read": True}})
+            "sender_id": {"$ne": user_oid},
+            "status": {"$ne": "read"}  # Don't update if already read
+        }).to_list()
         
-        # Get conversation IDs for these messages
-        messages = await Message.find({"_id": {"$in": msg_oids}}).to_list()
-        conv_ids = list(set(m.conversation_id for m in messages))
+        # Update each message
+        for message in messages_to_update:
+            message.status = "read"
+            await message.save()
         
         # Update member's last_read_at
+        conv_ids = list(set(m.conversation_id for m in messages_to_update))
         for conv_id in conv_ids:
             member = await ConversationMember.find_one(
                 ConversationMember.conversation_id == conv_id,
@@ -160,6 +166,36 @@ class MessageService:
             if member:
                 member.last_read_at = datetime.now(timezone.utc)
                 await member.save()
+        
+        return messages_to_update
+    
+    async def mark_messages_delivered_on_connect(self, user_id: str) -> list[Message]:
+        """
+        Mark all undelivered messages for this user as delivered.
+        Called when user connects to handle offline delivery.
+        """
+        user_oid = PydanticObjectId(user_id)
+        
+        # Find all conversations this user is in
+        members = await ConversationMember.find(
+            ConversationMember.user_id == user_oid
+        ).to_list()
+        
+        conv_ids = [m.conversation_id for m in members]
+        
+        # Find undelivered messages in those conversations (not sent by this user)
+        messages = await Message.find({
+            "conversation_id": {"$in": conv_ids},
+            "sender_id": {"$ne": user_oid},
+            "status": "sent"
+        }).to_list()
+        
+        # Mark as delivered
+        for message in messages:
+            message.status = "delivered"
+            await message.save()
+        
+        return messages
     
     async def get_unread_count(self, conversation_id: str, user_id: str) -> int:
         """Get count of unread messages for a user in a conversation."""

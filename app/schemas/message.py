@@ -50,8 +50,9 @@ class MessageResponse(BaseModel):
     encrypted_content: str
     nonce: str
     content_type: str
-    is_delivered: bool
-    is_read: bool
+    status: str = "sent"  # "sent" | "delivered" | "read"
+    is_delivered: bool = False  # Computed for backwards compatibility
+    is_read: bool = False  # Computed for backwards compatibility
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
