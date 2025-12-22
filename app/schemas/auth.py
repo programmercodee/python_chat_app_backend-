@@ -60,3 +60,16 @@ class TokenPayload(BaseModel):
     exp: int  # Expiration timestamp
     iat: int  # Issued at timestamp
     type: str  # Token type (access/refresh)
+
+
+class GoogleAuthRequest(BaseModel):
+    """Schema for Google OAuth authentication request."""
+    id_token: str = Field(..., description="Google ID token from frontend")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+            }
+        }
+    )

@@ -34,3 +34,7 @@ python-dotenv>=1.0.0
 
 # File Upload (Cloudinary)
 cloudinary>=1.36.0
+
+# Google OAuth
+google-auth>=2.25.0
+requests>=2.31.0

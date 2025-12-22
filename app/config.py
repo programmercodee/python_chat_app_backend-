@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     cloudinary_api_key: str = ""
     cloudinary_api_secret: str = ""
     
+    # Google OAuth
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    
     # Socket.IO / CORS - Allow Vite dev server
     socketio_cors_origins: str = '["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]'
     

@@ -56,16 +56,28 @@ class AuthService:
         Authenticate user and return tokens.
         """
         # Find user by email
-        # Find user by email
         user = await User.find_one(User.email == email)
         
+        # Check if user exists and has a password (OAuth-only users can't login with password)
+        if not user:
+            raise AuthenticationError(message="Invalid email or password")
+        
+        if not user.password_hash:
+            raise AuthenticationError(message="This account uses Google login. Please sign in with Google.")
+        
         # Verify password in threadpool to avoid blocking event loop
-        if not user or not await run_in_threadpool(verify_password, password, user.password_hash):
+        if not await run_in_threadpool(verify_password, password, user.password_hash):
             raise AuthenticationError(message="Invalid email or password")
         
         if not user.is_active:
             raise AuthenticationError(message="Account is disabled")
         
+        return await self.issue_tokens_for_user(user)
+    
+    async def issue_tokens_for_user(self, user: User) -> TokenResponse:
+        """
+        Issue JWT tokens for a user (used by both password and OAuth login).
+        """
         # Update last seen
         user.last_seen = datetime.now(timezone.utc)
         await user.save()
