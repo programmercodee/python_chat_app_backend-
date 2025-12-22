@@ -5,6 +5,7 @@ Uses Beanie ODM for MongoDB.
 
 from datetime import datetime, timezone
 from beanie import PydanticObjectId
+from fastapi.concurrency import run_in_threadpool
 
 from app.core.security import (
     create_access_token,
@@ -55,9 +56,11 @@ class AuthService:
         Authenticate user and return tokens.
         """
         # Find user by email
+        # Find user by email
         user = await User.find_one(User.email == email)
         
-        if not user or not verify_password(password, user.password_hash):
+        # Verify password in threadpool to avoid blocking event loop
+        if not user or not await run_in_threadpool(verify_password, password, user.password_hash):
             raise AuthenticationError(message="Invalid email or password")
         
         if not user.is_active:
