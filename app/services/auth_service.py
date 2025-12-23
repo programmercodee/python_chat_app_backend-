@@ -125,3 +125,14 @@ class AuthService:
             return await User.get(PydanticObjectId(user_id))
         except Exception:
             return None
+    
+    async def check_username_availability(self, username: str) -> bool:
+        """
+        Check if a username is available.
+        
+        Returns:
+            True if username is available, False if taken
+        """
+        existing = await User.find_one(User.username == username)
+        return existing is None
+

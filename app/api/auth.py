@@ -93,6 +93,22 @@ async def get_me(current_user: CurrentUser) -> UserResponse:
     return UserResponse.model_validate(current_user)
 
 
+@router.get(
+    "/check-username",
+    summary="Check if username is available",
+)
+async def check_username(
+    username: str,
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+) -> dict:
+    """
+    Check if a username is available for registration.
+    Used for real-time validation in the registration form.
+    """
+    is_available = await auth_service.check_username_availability(username)
+    return {"available": is_available}
+
+
 @router.post(
     "/google/login",
     response_model=TokenResponse,
@@ -128,18 +144,16 @@ async def google_login(
 
 @router.post(
     "/google/register",
-    response_model=TokenResponse,
-    summary="Register with Google (new users only)",
+    summary="Register with Google (new users only) - Step 1",
 )
 async def google_register(
     request: GoogleAuthRequest,
-    auth_service: Annotated[AuthService, Depends(get_auth_service)],
-) -> TokenResponse:
+):
     """
-    Register with Google OAuth - for NEW users only.
+    Register with Google OAuth - Step 1.
     
+    Verifies Google token and returns user info for username selection.
     If user already exists, returns 409 asking them to login instead.
-    Creates new user with Google and issues JWT.
     """
     from app.services.google_auth_service import GoogleAuthService
     
@@ -149,11 +163,87 @@ async def google_register(
         # Verify Google token
         google_info = await google_service.verify_id_token(request.id_token)
         
-        # Create new user (raises 409 if already exists)
-        user = await google_service.create_google_user(google_info)
+        # Check if user already exists
+        from app.models.user import User
+        existing_user = await User.find_one(User.email == google_info['email'])
         
-        # Issue our JWT tokens
+        if existing_user:
+            raise AppException(
+                message="An account with this email already exists. Please login instead.",
+                status_code=409
+            )
+        
+        # Return Google info for frontend to show username popup
+        # Frontend will call /google/complete-registration with username
+        return {
+            "pending": True,
+            "email": google_info['email'],
+            "name": google_info.get('name', ''),
+            "picture": google_info.get('picture', ''),
+            "google_id": google_info['sub'],
+        }
+        
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+
+from pydantic import BaseModel
+
+class GoogleCompleteRequest(BaseModel):
+    email: str
+    google_id: str
+    name: str
+    picture: str
+    username: str
+
+
+@router.post(
+    "/google/complete-registration",
+    response_model=TokenResponse,
+    summary="Complete Google registration with username - Step 2",
+)
+async def google_complete_registration(
+    request: GoogleCompleteRequest,
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+) -> TokenResponse:
+    """
+    Complete Google OAuth registration - Step 2.
+    
+    Creates user with the chosen username and issues JWT.
+    """
+    try:
+        from app.models.user import User
+        
+        # Double-check email doesn't exist
+        existing_email = await User.find_one(User.email == request.email)
+        if existing_email:
+            raise AppException(
+                message="An account with this email already exists.",
+                status_code=409
+            )
+        
+        # Check username availability
+        existing_username = await User.find_one(User.username == request.username)
+        if existing_username:
+            raise AppException(
+                message="Username already taken",
+                status_code=409
+            )
+        
+        # Create new user
+        user = User(
+            email=request.email,
+            username=request.username,
+            oauth_provider="google",
+            oauth_id=request.google_id,
+            avatar_url=request.picture if request.picture else None,
+        )
+        
+        await user.insert()
+        
+        # Issue JWT tokens
         return await auth_service.issue_tokens_for_user(user)
         
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
+
