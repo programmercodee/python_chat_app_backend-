@@ -67,15 +67,16 @@ class GoogleAuthService:
                 status_code=401
             )
     
-    async def find_or_create_user(self, google_info: dict) -> User:
+    async def find_existing_user(self, google_info: dict) -> User:
         """
-        Handle account linking logic:
-        
-        Case A: Email doesn't exist → Create new user with Google
-        Case B: Email exists → Link Google to existing account
+        Find existing user by email for Google LOGIN.
+        Does NOT create new users - they must register first.
         
         Returns:
-            User object (new or existing)
+            User object if exists
+            
+        Raises:
+            AppException if user not found
         """
         email = google_info['email']
         google_id = google_info['sub']
@@ -83,23 +84,48 @@ class GoogleAuthService:
         # Check if user exists by email
         existing_user = await User.find_one(User.email == email)
         
-        if existing_user:
-            # Case B: Link Google to existing account
-            if not existing_user.oauth_provider:
-                # First time linking Google
-                existing_user.oauth_provider = "google"
-                existing_user.oauth_id = google_id
-                
-                # Optionally update avatar if not set
-                if not existing_user.avatar_url and google_info.get('picture'):
-                    existing_user.avatar_url = google_info['picture']
-                
-                await existing_user.save()
-            
-            return existing_user
+        if not existing_user:
+            raise AppException(
+                message="No account found with this email. Please register first.",
+                status_code=404
+            )
         
-        # Case A: Create new user with Google
-        # Generate username from email or name
+        # Link Google to existing account if not already linked
+        if not existing_user.oauth_provider:
+            existing_user.oauth_provider = "google"
+            existing_user.oauth_id = google_id
+            
+            # Update avatar if not set
+            if not existing_user.avatar_url and google_info.get('picture'):
+                existing_user.avatar_url = google_info['picture']
+            
+            await existing_user.save()
+        
+        return existing_user
+    
+    async def create_google_user(self, google_info: dict) -> User:
+        """
+        Create new user with Google for REGISTRATION.
+        
+        Returns:
+            New User object
+            
+        Raises:
+            AppException if user already exists
+        """
+        email = google_info['email']
+        google_id = google_info['sub']
+        
+        # Check if user already exists
+        existing_user = await User.find_one(User.email == email)
+        
+        if existing_user:
+            raise AppException(
+                message="An account with this email already exists. Please login instead.",
+                status_code=409
+            )
+        
+        # Create new user with Google
         base_username = google_info['name'].replace(' ', '_') or email.split('@')[0]
         username = await self._generate_unique_username(base_username)
         
@@ -117,7 +143,6 @@ class GoogleAuthService:
     
     async def _generate_unique_username(self, base: str) -> str:
         """Generate a unique username, appending numbers if needed."""
-        # Clean the base username
         import re
         base = re.sub(r'[^a-zA-Z0-9_]', '', base)[:40]
         

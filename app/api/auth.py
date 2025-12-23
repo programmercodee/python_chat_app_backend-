@@ -94,40 +94,65 @@ async def get_me(current_user: CurrentUser) -> UserResponse:
 
 
 @router.post(
-    "/google",
+    "/google/login",
     response_model=TokenResponse,
-    summary="Authenticate with Google",
+    summary="Login with Google (existing users only)",
 )
-async def google_auth(
+async def google_login(
     request: GoogleAuthRequest,
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> TokenResponse:
     """
-    Authenticate with Google OAuth.
+    Login with Google OAuth - for EXISTING users only.
     
-    Flow:
-    1. Frontend gets ID token from Google
-    2. Backend verifies token with Google
-    3. Backend finds or creates user (account linking)
-    4. Backend issues our own JWT tokens
-    
-    Security notes:
-    - Email is extracted ONLY from verified token (never trust frontend)
-    - Google token is not stored
-    - Our own JWT is issued after verification
+    If user doesn't exist, returns 404 asking them to register first.
+    If user exists, links Google and issues JWT.
     """
     from app.services.google_auth_service import GoogleAuthService
     
     google_service = GoogleAuthService()
     
     try:
-        # Step 1: Verify Google token (server-side)
+        # Verify Google token
         google_info = await google_service.verify_id_token(request.id_token)
         
-        # Step 2: Find or create user (account linking)
-        user = await google_service.find_or_create_user(google_info)
+        # Find existing user (raises 404 if not found)
+        user = await google_service.find_existing_user(google_info)
         
-        # Step 3: Issue our JWT tokens
+        # Issue our JWT tokens
+        return await auth_service.issue_tokens_for_user(user)
+        
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+
+@router.post(
+    "/google/register",
+    response_model=TokenResponse,
+    summary="Register with Google (new users only)",
+)
+async def google_register(
+    request: GoogleAuthRequest,
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+) -> TokenResponse:
+    """
+    Register with Google OAuth - for NEW users only.
+    
+    If user already exists, returns 409 asking them to login instead.
+    Creates new user with Google and issues JWT.
+    """
+    from app.services.google_auth_service import GoogleAuthService
+    
+    google_service = GoogleAuthService()
+    
+    try:
+        # Verify Google token
+        google_info = await google_service.verify_id_token(request.id_token)
+        
+        # Create new user (raises 409 if already exists)
+        user = await google_service.create_google_user(google_info)
+        
+        # Issue our JWT tokens
         return await auth_service.issue_tokens_for_user(user)
         
     except AppException as e:
