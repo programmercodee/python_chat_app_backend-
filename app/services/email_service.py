@@ -81,9 +81,7 @@ class EmailService:
             return
 
         if self.provider == "brevo":
-            from starlette.concurrency import run_in_threadpool
-            # Run blocking SMTP in a separate thread to avoid hanging the event loop
-            await run_in_threadpool(self._send_via_brevo_sync, email, otp_code, template_name, subject)
+            await self._send_via_brevo(email, otp_code, template_name, subject)
         elif self.provider == "resend":
             await self._send_via_resend(email, otp_code, template_name, subject)
         else:
@@ -98,11 +96,11 @@ class EmailService:
             subject="TalkTogether - Verify Your Email"
         )
 
-    # ... (registration wrapper remains same) ...
-
-    def _send_via_brevo_sync(self, email: str, otp_code: str, template_name: str, subject: str):
-        """Send email using Brevo SMTP relay (Blocking - must run in threadpool)."""
+    async def _send_via_brevo(self, email: str, otp_code: str, template_name: str, subject: str):
+        """Send email using Brevo HTTP API (Async - works on all cloud providers)."""
         try:
+            import httpx
+            
             # Render HTML template
             if self.jinja_env:
                 template = self.jinja_env.get_template(template_name)
@@ -114,23 +112,33 @@ class EmailService:
                 <p>This code expires in 10 minutes.</p>
                 """
             
-            # Create message
-            msg = MIMEMultipart('alternative')
-            msg['Subject'] = subject
-            msg['From'] = f"{settings.brevo_sender_name} <{settings.brevo_sender_email}>"
-            msg['To'] = email
+            # Brevo API Payload
+            payload = {
+                "sender": {"name": settings.brevo_sender_name, "email": settings.brevo_sender_email},
+                "to": [{"email": email}],
+                "subject": subject,
+                "htmlContent": html_content
+            }
             
-            # Attach HTML content
-            html_part = MIMEText(html_content, 'html')
-            msg.attach(html_part)
+            headers = {
+                "accept": "application/json",
+                "api-key": settings.brevo_api_key,
+                "content-type": "application/json"
+            }
             
-            # Send via Brevo SMTP with 15s timeout
-            with smtplib.SMTP('smtp-relay.brevo.com', 587, timeout=15) as server:
-                server.starttls()
-                server.login(settings.brevo_login, settings.brevo_api_key)
-                server.sendmail(settings.brevo_sender_email, email, msg.as_string())
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.brevo.com/v3/smtp/email",
+                    json=payload,
+                    headers=headers,
+                    timeout=15.0
+                )
+                
+                if response.status_code not in [200, 201, 202]:
+                    logger.error(f"Brevo API error: {response.text}")
+                    raise Exception(f"Brevo API returned {response.status_code}: {response.text}")
             
-            logger.info(f"OTP email sent to {email} via Brevo SMTP")
+            logger.info(f"OTP email sent to {email} via Brevo HTTP API")
         except Exception as e:
             logger.error(f"Failed to send email via Brevo to {email}: {str(e)}")
             raise
