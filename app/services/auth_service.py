@@ -166,6 +166,12 @@ class AuthService:
         except Exception as e:
             import logging
             logging.getLogger("app").warning(f"Email failed for registration OTP {email}: {e}")
+            # Print OTP to console for testing (when Resend domain not verified)
+            print(f"\n{'='*50}")
+            print(f"📧 REGISTRATION OTP (Email failed)")
+            print(f"   To: {email}")
+            print(f"   OTP Code: {otp}")
+            print(f"{'='*50}\n")
     
     async def verify_registration_otp(self, email: str, otp: str) -> str:
         """

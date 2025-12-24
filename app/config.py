@@ -57,9 +57,15 @@ class Settings(BaseSettings):
     use_credentials: bool = True
     validate_certs: bool = True
     
-    # Resend (Email API - preferred for cloud hosting)
+    # Resend (Email API - requires verified domain)
     resend_api_key: str = ""
     resend_from_email: str = "onboarding@resend.dev"
+    
+    # Brevo (SMTP - works without domain, 300 free/day)
+    brevo_api_key: str = ""
+    brevo_login: str = ""  # SMTP login (e.g., xxx@smtp-brevo.com)
+    brevo_sender_email: str = ""  # Verified sender email
+    brevo_sender_name: str = "TalkTogether"
     
     # Socket.IO / CORS - Allow Vite dev server
     socketio_cors_origins: str = '["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]'

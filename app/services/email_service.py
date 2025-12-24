@@ -1,14 +1,19 @@
 """
-Email service using Resend API (works on all cloud providers).
-Falls back to fastapi-mail SMTP for local development.
+Email service supporting multiple providers:
+1. Brevo (SMTP) - Works without domain verification, 300 free/day
+2. Resend (API) - Requires verified domain
+3. SMTP (Legacy) - For local development
 """
 
 import logging
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 from app.config import settings
 
-# Conditional import - resend may not be installed locally
+# Conditional import - resend may not be installed
 try:
     import resend
     RESEND_AVAILABLE = True
@@ -20,14 +25,19 @@ logger = logging.getLogger(__name__)
 
 class EmailService:
     def __init__(self):
-        # Prefer Resend API if configured AND available (works on Render, Heroku, etc.)
-        if settings.resend_api_key and RESEND_AVAILABLE:
+        # Priority 1: Brevo (works without domain verification)
+        if settings.brevo_api_key and settings.brevo_login and settings.brevo_sender_email:
+            self.provider = "brevo"
+            self.enabled = True
+            logger.info("Email service initialized with Brevo SMTP")
+        # Priority 2: Resend (requires verified domain)
+        elif settings.resend_api_key and RESEND_AVAILABLE:
             resend.api_key = settings.resend_api_key
             self.provider = "resend"
             self.enabled = True
             logger.info("Email service initialized with Resend API")
+        # Priority 3: Legacy SMTP (for local development)
         elif settings.mail_server and settings.mail_from:
-            # Fallback to SMTP (for local development)
             from fastapi_mail import FastMail, ConnectionConfig
             self.conf = ConnectionConfig(
                 MAIL_USERNAME=settings.mail_username,
@@ -51,7 +61,7 @@ class EmailService:
             self.provider = None
             logger.warning("No email provider configured. Email sending is disabled.")
         
-        # Load Jinja2 templates for Resend
+        # Load Jinja2 templates
         template_dir = Path(__file__).parent.parent / 'templates' / 'email'
         if template_dir.exists():
             self.jinja_env = Environment(loader=FileSystemLoader(str(template_dir)))
@@ -70,7 +80,9 @@ class EmailService:
             logger.info(f"Email service disabled. Mock OTP for {email}: {otp_code}")
             return
 
-        if self.provider == "resend":
+        if self.provider == "brevo":
+            await self._send_via_brevo(email, otp_code, template_name, subject)
+        elif self.provider == "resend":
             await self._send_via_resend(email, otp_code, template_name, subject)
         else:
             await self._send_via_smtp(email, otp_code, template_name, subject)
@@ -84,6 +96,41 @@ class EmailService:
             subject="TalkTogether - Verify Your Email"
         )
 
+    async def _send_via_brevo(self, email: str, otp_code: str, template_name: str, subject: str):
+        """Send email using Brevo SMTP relay."""
+        try:
+            # Render HTML template
+            if self.jinja_env:
+                template = self.jinja_env.get_template(template_name)
+                html_content = template.render(otp_code=otp_code)
+            else:
+                html_content = f"""
+                <h2>Verification Code</h2>
+                <p>Your code is: <strong>{otp_code}</strong></p>
+                <p>This code expires in 10 minutes.</p>
+                """
+            
+            # Create message
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = f"{settings.brevo_sender_name} <{settings.brevo_sender_email}>"
+            msg['To'] = email
+            
+            # Attach HTML content
+            html_part = MIMEText(html_content, 'html')
+            msg.attach(html_part)
+            
+            # Send via Brevo SMTP
+            with smtplib.SMTP('smtp-relay.brevo.com', 587) as server:
+                server.starttls()
+                server.login(settings.brevo_login, settings.brevo_api_key)
+                server.sendmail(settings.brevo_sender_email, email, msg.as_string())
+            
+            logger.info(f"OTP email sent to {email} via Brevo SMTP")
+        except Exception as e:
+            logger.error(f"Failed to send email via Brevo to {email}: {str(e)}")
+            raise
+
     async def _send_via_resend(self, email: str, otp_code: str, template_name: str, subject: str):
         """Send email using Resend HTTP API."""
         try:
@@ -92,7 +139,6 @@ class EmailService:
                 template = self.jinja_env.get_template(template_name)
                 html_content = template.render(otp_code=otp_code)
             else:
-                # Fallback plain HTML
                 html_content = f"""
                 <h2>Verification Code</h2>
                 <p>Your code is: <strong>{otp_code}</strong></p>
