@@ -81,12 +81,14 @@ class EmailService:
             return
 
         if self.provider == "brevo":
-            await self._send_via_brevo(email, otp_code, template_name, subject)
+            from starlette.concurrency import run_in_threadpool
+            # Run blocking SMTP in a separate thread to avoid hanging the event loop
+            await run_in_threadpool(self._send_via_brevo_sync, email, otp_code, template_name, subject)
         elif self.provider == "resend":
             await self._send_via_resend(email, otp_code, template_name, subject)
         else:
             await self._send_via_smtp(email, otp_code, template_name, subject)
-    
+
     async def send_registration_otp_email(self, email: str, otp_code: str):
         """Send OTP for registration email verification."""
         await self.send_otp_email(
@@ -96,8 +98,10 @@ class EmailService:
             subject="TalkTogether - Verify Your Email"
         )
 
-    async def _send_via_brevo(self, email: str, otp_code: str, template_name: str, subject: str):
-        """Send email using Brevo SMTP relay."""
+    # ... (registration wrapper remains same) ...
+
+    def _send_via_brevo_sync(self, email: str, otp_code: str, template_name: str, subject: str):
+        """Send email using Brevo SMTP relay (Blocking - must run in threadpool)."""
         try:
             # Render HTML template
             if self.jinja_env:
@@ -120,8 +124,8 @@ class EmailService:
             html_part = MIMEText(html_content, 'html')
             msg.attach(html_part)
             
-            # Send via Brevo SMTP
-            with smtplib.SMTP('smtp-relay.brevo.com', 587) as server:
+            # Send via Brevo SMTP with 15s timeout
+            with smtplib.SMTP('smtp-relay.brevo.com', 587, timeout=15) as server:
                 server.starttls()
                 server.login(settings.brevo_login, settings.brevo_api_key)
                 server.sendmail(settings.brevo_sender_email, email, msg.as_string())
