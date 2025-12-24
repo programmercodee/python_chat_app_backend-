@@ -5,13 +5,14 @@ Handles user registration, login, and token refresh.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 
 from app.dependencies import get_auth_service, CurrentUser
 from app.services.auth_service import AuthService
 from app.schemas.user import UserCreate, UserResponse
 from app.schemas.auth import LoginRequest, TokenResponse, RefreshTokenRequest, GoogleAuthRequest
-from app.core.exceptions import AppException
+from app.core.exceptions import AppException, RateLimitExceeded
+from app.core.rate_limiter import rate_limiter
 
 
 router = APIRouter()
@@ -47,6 +48,7 @@ async def register(
     summary="Login and get access token",
 )
 async def login(
+    request: Request,
     credentials: LoginRequest,
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> TokenResponse:
@@ -54,9 +56,24 @@ async def login(
     Authenticate with email and password.
     
     Returns access and refresh tokens for API authentication.
+    Rate limited: 5/15min per email, 10/15min per IP
     """
+    client_ip = request.client.host if request.client else "unknown"
+    
+    # Check rate limits
+    email_allowed, _, email_retry = await rate_limiter.check(f"login:email:{credentials.email}", max_requests=5, window_seconds=900)
+    ip_allowed, _, ip_retry = await rate_limiter.check(f"login:ip:{client_ip}", max_requests=10, window_seconds=900)
+    
+    if not email_allowed:
+        raise RateLimitExceeded(message="Too many login attempts. Please try again later.", retry_after=email_retry)
+    if not ip_allowed:
+        raise RateLimitExceeded(message="Too many login attempts from this IP.", retry_after=ip_retry)
+    
     try:
-        return await auth_service.login(credentials.email, credentials.password)
+        result = await auth_service.login(credentials.email, credentials.password)
+        # Reset rate limit on successful login
+        await rate_limiter.reset(f"login:email:{credentials.email}")
+        return result
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
 
@@ -251,6 +268,102 @@ async def google_complete_registration(
         raise HTTPException(status_code=e.status_code, detail=e.message)
 
 
+# ==================== REGISTRATION OTP ====================
+
+class RegisterSendOTPRequest(BaseModel):
+    email: EmailStr
+
+class RegisterVerifyOTPRequest(BaseModel):
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6)
+
+
+@router.post("/register/send-otp", summary="Send OTP for email verification during registration")
+async def register_send_otp(
+    request: Request,
+    data: RegisterSendOTPRequest,
+    auth_service: Annotated[AuthService, Depends(get_auth_service)]
+):
+    """
+    Step 1 of registration: Send OTP to verify email.
+    - Validates email is not already registered
+    - Sends 6-digit OTP to email
+    Rate limited: 3/hour per email, 10/hour per IP
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    
+    # Check rate limits
+    email_allowed, _, email_retry = await rate_limiter.check(f"reg_otp:email:{data.email}", max_requests=3, window_seconds=3600)
+    ip_allowed, _, ip_retry = await rate_limiter.check(f"reg_otp:ip:{client_ip}", max_requests=10, window_seconds=3600)
+    
+    if not email_allowed:
+        raise RateLimitExceeded(message="Too many registration attempts. Please try again later.", retry_after=email_retry)
+    if not ip_allowed:
+        raise RateLimitExceeded(message="Too many registration attempts from this IP.", retry_after=ip_retry)
+    
+    try:
+        await auth_service.send_registration_otp(data.email)
+        return {"message": "OTP sent to your email. Please verify to continue registration."}
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+
+@router.post("/register/verify-otp", summary="Verify OTP and get registration token")
+async def register_verify_otp(
+    data: RegisterVerifyOTPRequest,
+    auth_service: Annotated[AuthService, Depends(get_auth_service)]
+) -> dict:
+    """
+    Step 2 of registration: Verify OTP.
+    Returns a registration token to complete the registration with username.
+    Rate limited: 5 attempts per 10 minutes per email
+    """
+    # Check rate limit for OTP verification
+    allowed, _, retry_after = await rate_limiter.check(f"reg_verify:email:{data.email}", max_requests=5, window_seconds=600)
+    
+    if not allowed:
+        await rate_limiter.apply_lockout(f"reg_verify:{data.email}", duration_seconds=1800)
+        raise RateLimitExceeded(message="Too many verification attempts. Please wait 30 minutes.", retry_after=1800)
+    
+    # Check lockout
+    is_locked, lock_remaining = await rate_limiter.is_locked_out(f"reg_verify:{data.email}")
+    if is_locked:
+        raise RateLimitExceeded(message="Temporarily locked. Please try again later.", retry_after=lock_remaining)
+    
+    try:
+        email_verified_token = await auth_service.verify_registration_otp(data.email, data.otp)
+        # Reset rate limit on success
+        await rate_limiter.reset(f"reg_verify:email:{data.email}")
+        return {"verified": True, "email_verified_token": email_verified_token}
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+
+class CompleteRegistrationRequest(BaseModel):
+    email_verified_token: str
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=8)
+
+
+@router.post("/register/complete", response_model=TokenResponse, summary="Complete registration with verified email")
+async def complete_registration(
+    data: CompleteRegistrationRequest,
+    auth_service: Annotated[AuthService, Depends(get_auth_service)]
+) -> TokenResponse:
+    """
+    Final step of registration: Complete with username and password.
+    Requires a valid email_verified_token from OTP verification.
+    Returns access and refresh tokens (auto-login).
+    """
+    try:
+        result = await auth_service.complete_registration(data.email_verified_token, data.username, data.password)
+        return result
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+
+# ==================== FORGOT PASSWORD ====================
+
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
@@ -263,13 +376,26 @@ class ResetPasswordRequest(BaseModel):
 
 @router.post("/forgot-password", summary="Initiate password reset flow")
 async def forgot_password(
+    request: Request,
     data: ForgotPasswordRequest,
     auth_service: Annotated[AuthService, Depends(get_auth_service)]
 ):
     """
     Initiate password reset flow.
     Generates OTP and sends it to the user's email.
+    Rate limited: 3/hour per email, 10/hour per IP
     """
+    client_ip = request.client.host if request.client else "unknown"
+    
+    # Check rate limits
+    email_allowed, _, email_retry = await rate_limiter.check(f"forgot:email:{data.email}", max_requests=3, window_seconds=3600)
+    ip_allowed, _, ip_retry = await rate_limiter.check(f"forgot:ip:{client_ip}", max_requests=10, window_seconds=3600)
+    
+    if not email_allowed:
+        raise RateLimitExceeded(message="Too many password reset requests. Please try again later.", retry_after=email_retry)
+    if not ip_allowed:
+        raise RateLimitExceeded(message="Too many password reset requests from this IP.", retry_after=ip_retry)
+    
     try:
         await auth_service.forgot_password(data.email)
         return {"message": "If the account exists, an OTP has been sent to your email."}
@@ -283,9 +409,25 @@ async def verify_otp(
 ) -> dict:
     """
     Verify OTP. Returns a temporary reset token if valid.
+    Rate limited: 5 attempts per 10 minutes per email
     """
+    # Check rate limit for OTP verification (prevents brute force)
+    allowed, _, retry_after = await rate_limiter.check(f"otp:email:{data.email}", max_requests=5, window_seconds=600)
+    
+    if not allowed:
+        # Apply lockout after too many failures
+        await rate_limiter.apply_lockout(f"otp:{data.email}", duration_seconds=1800)  # 30 min lockout
+        raise RateLimitExceeded(message="Too many OTP attempts. Please wait 30 minutes.", retry_after=1800)
+    
+    # Check if already locked out
+    is_locked, lock_remaining = await rate_limiter.is_locked_out(f"otp:{data.email}")
+    if is_locked:
+        raise RateLimitExceeded(message="Account temporarily locked. Please try again later.", retry_after=lock_remaining)
+    
     try:
         reset_token = await auth_service.verify_otp(data.email, data.otp)
+        # Reset rate limit on success
+        await rate_limiter.reset(f"otp:email:{data.email}")
         return {"reset_token": reset_token}
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)

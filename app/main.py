@@ -112,6 +112,22 @@ async def log_requests(request: Request, call_next):
 
 # ==================== EXCEPTION HANDLERS ====================
 
+from app.core.exceptions import RateLimitExceeded
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_exception_handler(request: Request, exc: RateLimitExceeded):
+    """Handle rate limit exceeded with Retry-After header."""
+    logger.warning(f"RateLimit: {exc.message} | Path: {request.url.path} | Retry-After: {exc.retry_after}s")
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": exc.message,
+            "retry_after": exc.retry_after,
+        },
+        headers={"Retry-After": str(exc.retry_after)},
+    )
+
+
 @app.exception_handler(AppException)
 async def app_exception_handler(request: Request, exc: AppException):
     """Handle custom application exceptions."""

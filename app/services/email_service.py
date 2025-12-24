@@ -58,7 +58,8 @@ class EmailService:
         else:
             self.jinja_env = None
 
-    async def send_otp_email(self, email: str, otp_code: str):
+    async def send_otp_email(self, email: str, otp_code: str, template_name: str = "otp.html", subject: str = "TalkTogether - Password Reset OTP"):
+        """Send OTP email with customizable template."""
         if not self.enabled:
             # Make OTP visible in terminal for testing
             print(f"\n{'='*50}")
@@ -70,29 +71,38 @@ class EmailService:
             return
 
         if self.provider == "resend":
-            await self._send_via_resend(email, otp_code)
+            await self._send_via_resend(email, otp_code, template_name, subject)
         else:
-            await self._send_via_smtp(email, otp_code)
+            await self._send_via_smtp(email, otp_code, template_name, subject)
+    
+    async def send_registration_otp_email(self, email: str, otp_code: str):
+        """Send OTP for registration email verification."""
+        await self.send_otp_email(
+            email, 
+            otp_code, 
+            template_name="registration_otp.html",
+            subject="TalkTogether - Verify Your Email"
+        )
 
-    async def _send_via_resend(self, email: str, otp_code: str):
+    async def _send_via_resend(self, email: str, otp_code: str, template_name: str, subject: str):
         """Send email using Resend HTTP API."""
         try:
             # Render HTML template
             if self.jinja_env:
-                template = self.jinja_env.get_template("otp.html")
+                template = self.jinja_env.get_template(template_name)
                 html_content = template.render(otp_code=otp_code)
             else:
                 # Fallback plain HTML
                 html_content = f"""
-                <h2>Password Reset OTP</h2>
-                <p>Your OTP code is: <strong>{otp_code}</strong></p>
+                <h2>Verification Code</h2>
+                <p>Your code is: <strong>{otp_code}</strong></p>
                 <p>This code expires in 10 minutes.</p>
                 """
             
             params = {
                 "from": f"TalkTogether <{settings.resend_from_email}>",
                 "to": [email],
-                "subject": "TalkTogether - Password Reset OTP",
+                "subject": subject,
                 "html": html_content
             }
             
@@ -102,18 +112,18 @@ class EmailService:
             logger.error(f"Failed to send email via Resend to {email}: {str(e)}")
             raise
 
-    async def _send_via_smtp(self, email: str, otp_code: str):
+    async def _send_via_smtp(self, email: str, otp_code: str, template_name: str, subject: str):
         """Send email using SMTP (fastapi-mail)."""
         try:
             from fastapi_mail import MessageSchema, MessageType
             message = MessageSchema(
-                subject="TalkTogether - Password Reset OTP",
+                subject=subject,
                 recipients=[email],
                 template_body={"otp_code": otp_code},
                 subtype=MessageType.html
             )
             
-            await self.fastmail.send_message(message, template_name="otp.html")
+            await self.fastmail.send_message(message, template_name=template_name)
             logger.info(f"OTP email sent to {email} via SMTP")
         except Exception as e:
             logger.error(f"Failed to send email via SMTP to {email}: {str(e)}")

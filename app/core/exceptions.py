@@ -74,3 +74,16 @@ class ConflictError(AppException):
         details: Optional[Any] = None,
     ):
         super().__init__(message=message, status_code=409, details=details)
+
+
+class RateLimitExceeded(AppException):
+    """Raised when rate limit is exceeded."""
+    
+    def __init__(
+        self,
+        message: str = "Too many requests. Please try again later.",
+        retry_after: int = 60,
+        details: Optional[Any] = None,
+    ):
+        self.retry_after = retry_after
+        super().__init__(message=message, status_code=429, details=details)

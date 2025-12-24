@@ -140,6 +140,106 @@ class AuthService:
         existing = await User.find_one(User.username == username)
         return existing is None
 
+    # ==================== REGISTRATION OTP ====================
+    
+    async def send_registration_otp(self, email: str) -> None:
+        """
+        Send OTP to verify email during registration.
+        
+        - Validates email is not already registered
+        - Sends OTP via email
+        """
+        # Check if email already exists
+        existing_email = await User.find_one(User.email == email)
+        if existing_email:
+            raise ConflictError(message="Email already registered")
+        
+        # Generate 6-digit OTP
+        otp = "".join([str(secrets.randbelow(10)) for _ in range(6)])
+        
+        # Store OTP in Redis (10 min expiry)
+        await redis_client.client.setex(f"register_otp:{email}", 600, otp)
+        
+        # Send OTP email (registration template)
+        try:
+            await email_service.send_registration_otp_email(email, otp)
+        except Exception as e:
+            import logging
+            logging.getLogger("app").warning(f"Email failed for registration OTP {email}: {e}")
+    
+    async def verify_registration_otp(self, email: str, otp: str) -> str:
+        """
+        Verify registration OTP and return an email_verified_token.
+        
+        Returns:
+            Email verified token (JWT) containing only the verified email
+        """
+        stored_otp = await redis_client.client.get(f"register_otp:{email}")
+        
+        if not stored_otp:
+            raise AuthenticationError(message="Invalid or expired OTP")
+        
+        if stored_otp != otp:
+            raise AuthenticationError(message="Invalid OTP")
+        
+        # Generate email_verified_token (valid for 30 minutes)
+        email_verified_token = create_access_token(
+            subject=email,
+            expires_delta=timedelta(minutes=30),
+            extra_claims={
+                "type": "email_verified"
+            }
+        )
+        
+        # Clean up OTP from Redis
+        await redis_client.client.delete(f"register_otp:{email}")
+        
+        return email_verified_token
+    
+    async def complete_registration(self, email_verified_token: str, username: str, password: str) -> TokenResponse:
+        """
+        Complete registration with verified email, username, and password.
+        
+        - Verifies email verified token
+        - Creates user with username and password
+        - Returns tokens for auto-login
+        """
+        from app.core.exceptions import ValidationError
+        
+        try:
+            payload = verify_token(email_verified_token, token_type="email_verified")
+            email = payload.get("sub")
+            
+            if not email:
+                raise AuthenticationError(message="Invalid token")
+        except Exception:
+            raise AuthenticationError(message="Invalid or expired token")
+        
+        # Validate password
+        if len(password) < 8:
+            raise ValidationError(message="Password must be at least 8 characters")
+        
+        # Check if email is still available (double-check)
+        existing_email = await User.find_one(User.email == email)
+        if existing_email:
+            raise ConflictError(message="Email already registered")
+        
+        # Check if username is available
+        existing_username = await User.find_one(User.username == username)
+        if existing_username:
+            raise ConflictError(message="Username already taken")
+        
+        # Create user with hashed password
+        user = User(
+            email=email,
+            username=username,
+            password_hash=get_password_hash(password),
+        )
+        await user.insert()
+        
+        # Issue tokens for auto-login
+        return await self.issue_tokens_for_user(user)
+
     async def forgot_password(self, email: str):
         """
         Generate OTP and send email for password reset.
