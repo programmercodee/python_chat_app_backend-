@@ -19,6 +19,10 @@ from app.models.user import User
 from app.schemas.user import UserCreate
 from app.schemas.auth import TokenResponse
 from app.config import settings
+import secrets
+from datetime import timedelta
+from app.core.redis import redis_client
+from app.services.email_service import email_service
 
 
 class AuthService:
@@ -135,4 +139,66 @@ class AuthService:
         """
         existing = await User.find_one(User.username == username)
         return existing is None
+
+    async def forgot_password(self, email: str):
+        """
+        Generate OTP and send email for password reset.
+        """
+        user = await User.find_one(User.email == email)
+        if not user:
+            # security: do not reveal if user exists, just return
+            return
+
+        if not user.password_hash:
+            # Google-only account, cannot reset password
+            from app.core.exceptions import ValidationError
+            raise ValidationError(message="This account uses Google Sign-In. Please login with Google instead.")
+
+        # Generate 6-digit OTP
+        otp = "".join([str(secrets.randbelow(10)) for _ in range(6)])
+        
+        # Store in Redis (10 minutes)
+        await redis_client.client.setex(f"reset_otp:{email}", 600, otp)
+        
+        # Send email (fire and forget or await)
+        await email_service.send_otp_email(email, otp)
+
+    async def verify_otp(self, email: str, otp: str) -> str:
+        """
+        Verify OTP and return a reset token.
+        """
+        stored_otp = await redis_client.client.get(f"reset_otp:{email}")
+        
+        if not stored_otp or stored_otp != otp:
+             raise AuthenticationError(message="Invalid or expired OTP")
+             
+        # Generate temporary reset token (Valid for 5 mins)
+        # Using email as subject and marking type as password_reset
+        reset_token = create_access_token(
+            subject=email, 
+            expires_delta=timedelta(minutes=5),
+            extra_claims={"type": "password_reset"}  # Override default "access" type
+        )
+        return reset_token
+
+    async def reset_password(self, reset_token: str, new_password: str):
+        """
+        Reset password using secure token.
+        """
+        try:
+             # Verify token with password_reset type (prevents using regular access tokens)
+             payload = verify_token(reset_token, token_type="password_reset")
+             email = payload.get("sub")
+        except Exception:
+             raise AuthenticationError(message="Invalid or expired token")
+             
+        user = await User.find_one(User.email == email)
+        if not user:
+             raise AuthenticationError(message="User not found")
+             
+        user.password_hash = get_password_hash(new_password)
+        await user.save()
+        
+        # Clean up OTP
+        await redis_client.client.delete(f"reset_otp:{email}")
 

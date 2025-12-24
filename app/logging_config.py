@@ -68,12 +68,21 @@ def setup_logging():
     sqlalchemy_logger = logging.getLogger("sqlalchemy.engine")
     sqlalchemy_logger.setLevel(logging.WARNING)  # Change to DEBUG to see all queries
     
-    # Socket.IO logs
+    # Socket.IO logs (suppress verbose connection logs)
     socketio_logger = logging.getLogger("socketio")
-    socketio_logger.setLevel(logging.INFO)
+    socketio_logger.setLevel(logging.WARNING)
     
+    # Engine.IO logs (suppress heartbeat logs)
     engineio_logger = logging.getLogger("engineio")
     engineio_logger.setLevel(logging.WARNING)
+    
+    # PyMongo logs (suppress heartbeat/topology logs)
+    pymongo_logger = logging.getLogger("pymongo")
+    pymongo_logger.setLevel(logging.WARNING)
+    
+    # Motor logs (async MongoDB driver)
+    motor_logger = logging.getLogger("motor")
+    motor_logger.setLevel(logging.WARNING)
     
     return logging.getLogger("app")
 

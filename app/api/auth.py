@@ -187,7 +187,10 @@ async def google_register(
         raise HTTPException(status_code=e.status_code, detail=e.message)
 
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
+from fastapi.security import OAuth2PasswordBearer
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 class GoogleCompleteRequest(BaseModel):
     email: str
@@ -244,6 +247,61 @@ async def google_complete_registration(
         # Issue JWT tokens
         return await auth_service.issue_tokens_for_user(user)
         
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class OTPVerifyRequest(BaseModel):
+    email: EmailStr
+    otp: str
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=8)
+
+@router.post("/forgot-password", summary="Initiate password reset flow")
+async def forgot_password(
+    data: ForgotPasswordRequest,
+    auth_service: Annotated[AuthService, Depends(get_auth_service)]
+):
+    """
+    Initiate password reset flow.
+    Generates OTP and sends it to the user's email.
+    """
+    try:
+        await auth_service.forgot_password(data.email)
+        return {"message": "If the account exists, an OTP has been sent to your email."}
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+@router.post("/verify-otp", summary="Verify OTP and get reset token")
+async def verify_otp(
+    data: OTPVerifyRequest,
+    auth_service: Annotated[AuthService, Depends(get_auth_service)]
+) -> dict:
+    """
+    Verify OTP. Returns a temporary reset token if valid.
+    """
+    try:
+        reset_token = await auth_service.verify_otp(data.email, data.otp)
+        return {"reset_token": reset_token}
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+@router.post("/reset-password", summary="Reset password using token")
+async def reset_password(
+    data: ResetPasswordRequest,
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+    token: str = Depends(oauth2_scheme),
+):
+    """
+    Reset password using the secure token obtained from OTP verification.
+    """
+    try:
+        await auth_service.reset_password(token, data.new_password)
+        return {"message": "Password reset successfully"}
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
 

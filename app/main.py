@@ -100,10 +100,13 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """Log all incoming requests."""
-    logger.info(f"📥 {request.method} {request.url.path}")
+    """Log only non-2xx responses to reduce noise."""
     response = await call_next(request)
-    logger.info(f"📤 {request.method} {request.url.path} -> {response.status_code}")
+    
+    # Only log errors (non-2xx status codes)
+    if response.status_code >= 400:
+        logger.warning(f"❌ {request.method} {request.url.path} -> {response.status_code}")
+    
     return response
 
 
