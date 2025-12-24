@@ -225,14 +225,21 @@ class AuthService:
         if len(password) < 8:
             raise ValidationError(message="Password must be at least 8 characters")
         
+        # Validate username format
+        from app.services.user_service import UserService
+        username = UserService.normalize_username(username)
+        is_valid, error = UserService.validate_username(username)
+        if not is_valid:
+            raise ValidationError(message=error)
+        
         # Check if email is still available (double-check)
         existing_email = await User.find_one(User.email == email)
         if existing_email:
             raise ConflictError(message="Email already registered")
         
-        # Check if username is available
-        existing_username = await User.find_one(User.username == username)
-        if existing_username:
+        # Check if username is available (case-insensitive)
+        user_service = UserService()
+        if not await user_service.is_username_available(username):
             raise ConflictError(message="Username already taken")
         
         # Create user with hashed password

@@ -120,10 +120,40 @@ async def check_username(
 ) -> dict:
     """
     Check if a username is available for registration.
-    Used for real-time validation in the registration form.
+    Returns validation status, error messages, and suggestions if taken.
     """
-    is_available = await auth_service.check_username_availability(username)
-    return {"available": is_available}
+    from app.services.user_service import UserService
+    user_service = UserService()
+    
+    # Validate format first
+    is_valid, error = UserService.validate_username(username)
+    if not is_valid:
+        return {
+            "available": False,
+            "valid": False,
+            "error": error,
+            "suggestions": []
+        }
+    
+    # Check availability
+    is_available = await user_service.is_username_available(username)
+    
+    if is_available:
+        return {
+            "available": True,
+            "valid": True,
+            "error": None,
+            "suggestions": []
+        }
+    else:
+        # Generate suggestions
+        suggestions = await user_service.generate_username_suggestions(username)
+        return {
+            "available": False,
+            "valid": True,
+            "error": "Username is already taken",
+            "suggestions": suggestions
+        }
 
 
 @router.post(
