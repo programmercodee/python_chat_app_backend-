@@ -292,4 +292,222 @@ def register_socket_events():
         await sio.emit('online_users', {'users': online}, to=sid)
     
     
+    # ==================== VOICE/VIDEO CALL SIGNALING ====================
+    # 
+    # These events handle WebRTC call setup between two users.
+    # The actual audio/video goes peer-to-peer via WebRTC.
+    # Socket.IO only handles the "signaling" (connection setup).
+    #
+    # Call Flow:
+    # 1. Caller sends 'call_initiate' → Receiver gets 'incoming_call'
+    # 2. Receiver accepts → sends 'call_accept'
+    # 3. Caller gets 'call_accepted', creates WebRTC offer
+    # 4. Exchange offer/answer/ice-candidates via socket
+    # 5. WebRTC connection established → audio/video flows directly
+    # 6. Either party sends 'call_end' to finish
+    #
+    
+    @sio.event
+    async def call_initiate(sid, data):
+        """
+        Step 1: Caller initiates a call.
+        
+        data = {
+            'to_user_id': '...',     # Who to call
+            'call_type': 'video'     # 'video' or 'audio'
+        }
+        """
+        session = await sio.get_session(sid)
+        caller_id = session.get('user_id')
+        if not caller_id:
+            return
+        
+        to_user_id = data.get('to_user_id')
+        call_type = data.get('call_type', 'video')
+        
+        logger.info(f"[Call] {caller_id} calling {to_user_id} ({call_type})")
+        
+        # Check if receiver is online
+        receiver_sid = socket_manager.get_socket_id(to_user_id)
+        if not receiver_sid:
+            # User is offline
+            await sio.emit('call_failed', {
+                'reason': 'user_offline',
+                'message': 'User is not available'
+            }, to=sid)
+            return
+        
+        # Get caller info for the incoming call popup
+        user_service = UserService()
+        caller = await user_service.get_user(caller_id)
+        
+        # Notify the receiver about incoming call
+        await sio.emit('incoming_call', {
+            'from_user_id': caller_id,
+            'from_username': caller.username if caller else 'Unknown',
+            'from_avatar': caller.avatar_url if caller else None,
+            'call_type': call_type
+        }, to=receiver_sid)
+        
+        # Confirm to caller that call is ringing
+        await sio.emit('call_ringing', {
+            'to_user_id': to_user_id
+        }, to=sid)
+    
+    
+    @sio.event
+    async def call_accept(sid, data):
+        """
+        Step 2: Receiver accepts the call.
+        
+        data = { 'to_user_id': '...' }  # The original caller
+        """
+        session = await sio.get_session(sid)
+        receiver_id = session.get('user_id')
+        if not receiver_id:
+            return
+        
+        caller_id = data.get('to_user_id')
+        caller_sid = socket_manager.get_socket_id(caller_id)
+        
+        logger.info(f"[Call] {receiver_id} accepted call from {caller_id}")
+        
+        if caller_sid:
+            # Tell caller to start WebRTC offer
+            await sio.emit('call_accepted', {
+                'from_user_id': receiver_id
+            }, to=caller_sid)
+    
+    
+    @sio.event
+    async def call_reject(sid, data):
+        """
+        Receiver rejects the incoming call.
+        
+        data = { 'to_user_id': '...' }  # The original caller
+        """
+        session = await sio.get_session(sid)
+        receiver_id = session.get('user_id')
+        if not receiver_id:
+            return
+        
+        caller_id = data.get('to_user_id')
+        caller_sid = socket_manager.get_socket_id(caller_id)
+        
+        logger.info(f"[Call] {receiver_id} rejected call from {caller_id}")
+        
+        if caller_sid:
+            await sio.emit('call_rejected', {
+                'from_user_id': receiver_id
+            }, to=caller_sid)
+    
+    
+    @sio.event
+    async def call_offer(sid, data):
+        """
+        Step 3: Caller sends WebRTC offer (SDP).
+        
+        data = {
+            'to_user_id': '...',
+            'offer': { ... }  # WebRTC SDP offer
+        }
+        """
+        session = await sio.get_session(sid)
+        caller_id = session.get('user_id')
+        if not caller_id:
+            return
+        
+        to_user_id = data.get('to_user_id')
+        offer = data.get('offer')
+        receiver_sid = socket_manager.get_socket_id(to_user_id)
+        
+        if receiver_sid:
+            await sio.emit('call_offer', {
+                'from_user_id': caller_id,
+                'offer': offer
+            }, to=receiver_sid)
+    
+    
+    @sio.event
+    async def call_answer(sid, data):
+        """
+        Step 4: Receiver sends WebRTC answer (SDP).
+        
+        data = {
+            'to_user_id': '...',
+            'answer': { ... }  # WebRTC SDP answer
+        }
+        """
+        session = await sio.get_session(sid)
+        receiver_id = session.get('user_id')
+        if not receiver_id:
+            return
+        
+        to_user_id = data.get('to_user_id')
+        answer = data.get('answer')
+        caller_sid = socket_manager.get_socket_id(to_user_id)
+        
+        if caller_sid:
+            await sio.emit('call_answer', {
+                'from_user_id': receiver_id,
+                'answer': answer
+            }, to=caller_sid)
+    
+    
+    @sio.event
+    async def call_ice_candidate(sid, data):
+        """
+        Step 5: Exchange ICE candidates for NAT traversal.
+        
+        Both parties send these as they discover network paths.
+        
+        data = {
+            'to_user_id': '...',
+            'candidate': { ... }  # ICE candidate
+        }
+        """
+        session = await sio.get_session(sid)
+        sender_id = session.get('user_id')
+        if not sender_id:
+            return
+        
+        to_user_id = data.get('to_user_id')
+        candidate = data.get('candidate')
+        receiver_sid = socket_manager.get_socket_id(to_user_id)
+        
+        if receiver_sid:
+            await sio.emit('call_ice_candidate', {
+                'from_user_id': sender_id,
+                'candidate': candidate
+            }, to=receiver_sid)
+    
+    
+    @sio.event
+    async def call_end(sid, data):
+        """
+        Step 6: Either party ends the call.
+        
+        data = {
+            'to_user_id': '...',
+            'reason': 'ended'  # 'ended', 'busy', 'timeout', 'failed'
+        }
+        """
+        session = await sio.get_session(sid)
+        user_id = session.get('user_id')
+        if not user_id:
+            return
+        
+        to_user_id = data.get('to_user_id')
+        reason = data.get('reason', 'ended')
+        other_sid = socket_manager.get_socket_id(to_user_id)
+        
+        logger.info(f"[Call] {user_id} ended call with {to_user_id} ({reason})")
+        
+        if other_sid:
+            await sio.emit('call_ended', {
+                'from_user_id': user_id,
+                'reason': reason
+            }, to=other_sid)
+    
+    
     logger.info("[Socket] Event handlers registered")
