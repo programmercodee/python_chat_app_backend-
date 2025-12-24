@@ -160,8 +160,13 @@ class AuthService:
         # Store in Redis (10 minutes)
         await redis_client.client.setex(f"reset_otp:{email}", 600, otp)
         
-        # Send email (fire and forget or await)
-        await email_service.send_otp_email(email, otp)
+        # Send email (gracefully handle SMTP failures on some hosting providers)
+        try:
+            await email_service.send_otp_email(email, otp)
+        except Exception as e:
+            # Log OTP for testing if email fails (e.g., Render blocks SMTP)
+            import logging
+            logging.getLogger("app").warning(f"Email failed, OTP for {email}: {otp} | Error: {e}")
 
     async def verify_otp(self, email: str, otp: str) -> str:
         """

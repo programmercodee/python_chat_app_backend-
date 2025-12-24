@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
 
-    # Email / SMTP
+    # Email / SMTP (Legacy - kept for backwards compatibility)
     mail_username: str = ""
     mail_password: str = ""
     mail_from: str = ""
@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     mail_ssl_tls: bool = False
     use_credentials: bool = True
     validate_certs: bool = True
+    
+    # Resend (Email API - preferred for cloud hosting)
+    resend_api_key: str = ""
+    resend_from_email: str = "onboarding@resend.dev"
     
     # Socket.IO / CORS - Allow Vite dev server
     socketio_cors_origins: str = '["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]'
