@@ -173,7 +173,7 @@ class ConversationService:
         
         # Use direct Motor collection to avoid Beanie/Motor version conflicts
         # (Beanie wrapper crashes on some versions by awaiting the cursor creation)
-        last_msg_cursor = Message.get_motor_collection().aggregate(pipeline_last_msg)
+        last_msg_cursor = Message.get_pymongo_collection().aggregate(pipeline_last_msg)
         last_messages_result = await last_msg_cursor.to_list(length=None)
         
         # Use str(_id) for map keys
@@ -194,7 +194,7 @@ class ConversationService:
         ]
         
         # Use direct Motor collection
-        unread_cursor = Message.get_motor_collection().aggregate(pipeline_unread)
+        unread_cursor = Message.get_pymongo_collection().aggregate(pipeline_unread)
         unread_results = await unread_cursor.to_list(length=None)
         
         unread_map = {str(r["_id"]): r["count"] for r in unread_results}
