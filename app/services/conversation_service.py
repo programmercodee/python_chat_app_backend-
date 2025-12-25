@@ -136,6 +136,7 @@ class ConversationService:
     async def get_user_conversations(self, user_id: str) -> list[dict]:
         """
         Get all conversations for a user with member details.
+        Optimized to avoid N+1 queries.
         """
         user_oid = PydanticObjectId(user_id)
         
@@ -144,17 +145,48 @@ class ConversationService:
             {"member_ids": user_oid}
         ).sort("-updated_at").to_list()
         
+        if not conversations:
+            return []
+        
+        # Collect ALL member IDs across ALL conversations
+        all_member_ids = set()
+        conv_ids = []
+        for conv in conversations:
+            conv_ids.append(conv.id)
+            for mid in conv.member_ids:
+                all_member_ids.add(mid)
+        
+        # BATCH FETCH: Get all users in ONE query (instead of N queries)
+        users = await User.find({"_id": {"$in": list(all_member_ids)}}).to_list()
+        user_map = {u.id: u for u in users}
+        
+        # BATCH FETCH: Get last message for each conversation
+        from app.models.message import Message
+        pipeline = [
+            {"$match": {"conversation_id": {"$in": conv_ids}}},
+            {"$sort": {"created_at": -1}},
+            {"$group": {
+                "_id": "$conversation_id",
+                "last_message": {"$first": "$$ROOT"}
+            }}
+        ]
+        last_messages_result = await Message.aggregate(pipeline).to_list()
+        last_msg_map = {r["_id"]: r["last_message"] for r in last_messages_result}
+        
+        # BATCH FETCH: Get unread counts for all conversations
+        from app.models.conversation import ConversationMember
+        members = await ConversationMember.find({
+            "conversation_id": {"$in": conv_ids},
+            "user_id": user_oid
+        }).to_list()
+        member_map = {m.conversation_id: m for m in members}
+        
         result = []
         for conv in conversations:
-            # Get member details
-            members = await ConversationMember.find(
-                ConversationMember.conversation_id == conv.id
-            ).to_list()
-            
-            # Build member info from User collection for latest data
+            # Build member info from cached user_map
             member_details = []
-            for member in members:
-                user = await User.get(member.user_id)
+            for mid in conv.member_ids:
+                user = user_map.get(mid)
                 if user:
                     member_details.append({
                         "user_id": str(user.id),
@@ -163,13 +195,36 @@ class ConversationService:
                         "avatar_url": user.avatar_url
                     })
             
+            # Get last message from cache
+            last_msg = last_msg_map.get(conv.id)
+            last_message_data = None
+            if last_msg:
+                last_message_data = {
+                    "id": str(last_msg["_id"]),
+                    "encrypted_content": last_msg.get("encrypted_content"),
+                    "sender_id": str(last_msg.get("sender_id")) if last_msg.get("sender_id") else None,
+                    "created_at": last_msg.get("created_at").isoformat() if last_msg.get("created_at") else None,
+                }
+            
+            # Calculate unread count
+            unread_count = 0
+            member = member_map.get(conv.id)
+            if member and member.last_read_at:
+                unread_count = await Message.find({
+                    "conversation_id": conv.id,
+                    "sender_id": {"$ne": user_oid},
+                    "created_at": {"$gt": member.last_read_at}
+                }).count()
+            
             result.append({
                 "id": str(conv.id),
                 "type": conv.type.value,
                 "name": conv.name,
                 "created_at": conv.created_at.isoformat(),
                 "updated_at": conv.updated_at.isoformat(),
-                "members": member_details
+                "members": member_details,
+                "last_message": last_message_data,
+                "unread_count": unread_count,
             })
         
         return result

@@ -39,6 +39,12 @@ class Message(Document):
     
     class Settings:
         name = "messages"
+        indexes = [
+            # Compound index for fast message fetching by conversation (sorted by time)
+            [("conversation_id", 1), ("created_at", -1)],
+            # Index for finding unread messages
+            [("conversation_id", 1), ("sender_id", 1), ("status", 1)],
+        ]
     
     def __repr__(self) -> str:
         return f"<Message(id={self.id}, sender={self.sender_id})>"

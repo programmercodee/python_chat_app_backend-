@@ -19,8 +19,15 @@ async def init_db():
     """
     global client
     
-    # Create MongoDB client
-    client = AsyncIOMotorClient(settings.mongodb_url)
+    # Create MongoDB client with connection pooling for better performance
+    client = AsyncIOMotorClient(
+        settings.mongodb_url,
+        maxPoolSize=50,              # Max connections in pool
+        minPoolSize=5,               # Keep 5 connections ready
+        maxIdleTimeMS=45000,         # Close idle connections after 45s
+        waitQueueTimeoutMS=5000,     # Timeout if pool exhausted
+        serverSelectionTimeoutMS=5000,  # Quick fail on connection issues
+    )
     
     # Use explicit database name
     db = client["chat_app"]

@@ -39,10 +39,12 @@ class GoogleAuthService:
         try:
             # Verify the token using Google's library
             # This checks signature, expiry, audience, issuer
+            # clock_skew_in_seconds handles time sync differences between servers
             idinfo = id_token.verify_oauth2_token(
                 token,
                 requests.Request(),
-                self.client_id
+                self.client_id,
+                clock_skew_in_seconds=10  # Allow 10 seconds clock difference
             )
             
             # Verify the issuer
