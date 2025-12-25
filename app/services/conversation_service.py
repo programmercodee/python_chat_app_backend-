@@ -156,13 +156,13 @@ class ConversationService:
             for mid in conv.member_ids:
                 all_member_ids.add(mid)
         
-        # BATCH FETCH: Get all users in ONE query (instead of N queries)
+        # BATCH FETCH: Get all users in ONE query
         users = await User.find({"_id": {"$in": list(all_member_ids)}}).to_list()
-        user_map = {u.id: u for u in users}
+        user_map = {str(u.id): u for u in users}  # Use str(id) for reliable lookup
         
         # BATCH FETCH: Get last message for each conversation
         from app.models.message import Message
-        pipeline = [
+        pipeline_last_msg = [
             {"$match": {"conversation_id": {"$in": conv_ids}}},
             {"$sort": {"created_at": -1}},
             {"$group": {
@@ -170,23 +170,42 @@ class ConversationService:
                 "last_message": {"$first": "$$ROOT"}
             }}
         ]
-        last_messages_result = await Message.aggregate(pipeline).to_list()
-        last_msg_map = {r["_id"]: r["last_message"] for r in last_messages_result}
         
-        # BATCH FETCH: Get unread counts for all conversations
-        from app.models.conversation import ConversationMember
-        members = await ConversationMember.find({
-            "conversation_id": {"$in": conv_ids},
-            "user_id": user_oid
-        }).to_list()
-        member_map = {m.conversation_id: m for m in members}
+        # Use direct Motor collection to avoid Beanie/Motor version conflicts
+        # (Beanie wrapper crashes on some versions by awaiting the cursor creation)
+        last_msg_cursor = Message.get_motor_collection().aggregate(pipeline_last_msg)
+        last_messages_result = await last_msg_cursor.to_list(length=None)
+        
+        # Use str(_id) for map keys
+        last_msg_map = {str(r["_id"]): r["last_message"] for r in last_messages_result}
+        
+        # BATCH FETCH: Get unread counts using Aggregation
+        # Count messages where sender != me AND status != 'read'
+        pipeline_unread = [
+            {"$match": {
+                "conversation_id": {"$in": conv_ids},
+                "sender_id": {"$ne": user_oid},
+                "status": {"$ne": "read"}
+            }},
+            {"$group": {
+                "_id": "$conversation_id",
+                "count": {"$sum": 1}
+            }}
+        ]
+        
+        # Use direct Motor collection
+        unread_cursor = Message.get_motor_collection().aggregate(pipeline_unread)
+        unread_results = await unread_cursor.to_list(length=None)
+        
+        unread_map = {str(r["_id"]): r["count"] for r in unread_results}
         
         result = []
         for conv in conversations:
             # Build member info from cached user_map
             member_details = []
             for mid in conv.member_ids:
-                user = user_map.get(mid)
+                # Safe lookup using string ID
+                user = user_map.get(str(mid))
                 if user:
                     member_details.append({
                         "user_id": str(user.id),
@@ -196,7 +215,7 @@ class ConversationService:
                     })
             
             # Get last message from cache
-            last_msg = last_msg_map.get(conv.id)
+            last_msg = last_msg_map.get(str(conv.id))
             last_message_data = None
             if last_msg:
                 last_message_data = {
@@ -204,17 +223,11 @@ class ConversationService:
                     "encrypted_content": last_msg.get("encrypted_content"),
                     "sender_id": str(last_msg.get("sender_id")) if last_msg.get("sender_id") else None,
                     "created_at": last_msg.get("created_at").isoformat() if last_msg.get("created_at") else None,
+                    "status": last_msg.get("status", "sent")
                 }
             
-            # Calculate unread count
-            unread_count = 0
-            member = member_map.get(conv.id)
-            if member and member.last_read_at:
-                unread_count = await Message.find({
-                    "conversation_id": conv.id,
-                    "sender_id": {"$ne": user_oid},
-                    "created_at": {"$gt": member.last_read_at}
-                }).count()
+            # Get unread count from cache
+            unread_count = unread_map.get(str(conv.id), 0)
             
             result.append({
                 "id": str(conv.id),
