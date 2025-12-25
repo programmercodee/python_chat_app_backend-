@@ -161,7 +161,11 @@ class ConversationService:
         user_map = {str(u.id): u for u in users}  # Use str(id) for reliable lookup
         
         # BATCH FETCH: Get last message for each conversation
-        from app.models.message import Message
+        # Use direct database client to avoid Beanie/Motor version conflicts
+        from app.database import get_client
+        db = get_client()["chat_app"]
+        messages_collection = db["messages"]
+        
         pipeline_last_msg = [
             {"$match": {"conversation_id": {"$in": conv_ids}}},
             {"$sort": {"created_at": -1}},
@@ -171,9 +175,7 @@ class ConversationService:
             }}
         ]
         
-        # Use direct Motor collection to avoid Beanie/Motor version conflicts
-        # (Beanie wrapper crashes on some versions by awaiting the cursor creation)
-        last_msg_cursor = Message.get_pymongo_collection().aggregate(pipeline_last_msg)
+        last_msg_cursor = messages_collection.aggregate(pipeline_last_msg)
         last_messages_result = await last_msg_cursor.to_list(length=None)
         
         # Use str(_id) for map keys
@@ -193,8 +195,7 @@ class ConversationService:
             }}
         ]
         
-        # Use direct Motor collection
-        unread_cursor = Message.get_pymongo_collection().aggregate(pipeline_unread)
+        unread_cursor = messages_collection.aggregate(pipeline_unread)
         unread_results = await unread_cursor.to_list(length=None)
         
         unread_map = {str(r["_id"]): r["count"] for r in unread_results}
